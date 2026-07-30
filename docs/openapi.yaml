@@ -104,9 +104,71 @@ paths:
                   type: object
                   additionalProperties:
                     type: string
+                templateID:
+                  type: string
+                  description: E2B-compatible alias for template_id.
+                timeout:
+                  type: integer
+                  minimum: 0
+                envVars:
+                  type: object
+                  additionalProperties:
+                    type: string
+                cpuCount:
+                  type: number
+                  exclusiveMinimum: 0
+                memoryMB:
+                  type: integer
+                  minimum: 128
+                diskSizeMB:
+                  type: integer
+                  minimum: 0
+                lifecycle:
+                  type: object
+                  properties:
+                    onTimeout:
+                      enum: [kill, pause]
+                    autoResume:
+                      type: boolean
       responses:
         "201":
           description: Sandbox running
+  /v2/sandboxes:
+    get:
+      summary: List sandboxes with E2B-compatible response fields
+      responses:
+        "200":
+          description: Sandbox list
+  /sandboxes-cold:
+    post:
+      summary: Cold-start directly from an OCI image using Docker
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                timeout:
+                  type: integer
+                  minimum: 0
+                cpuCount:
+                  type: number
+                  exclusiveMinimum: 0
+                memoryMB:
+                  type: integer
+                  minimum: 128
+                diskSizeMB:
+                  type: integer
+                  minimum: 0
+                allowInternetAccess:
+                  type: boolean
+      responses:
+        "201":
+          description: Docker sandbox running
   /sandboxes/{sandboxId}:
     get:
       summary: Inspect a sandbox
@@ -122,7 +184,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxId"
       responses:
-        "200":
+        "204":
           description: Sandbox deleted
   /sandboxes/{sandboxId}/exec:
     post:
@@ -151,7 +213,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxId"
       responses:
-        "200":
+        "204":
           description: Sandbox paused
   /sandboxes/{sandboxId}/resume:
     post:
@@ -159,8 +221,29 @@ paths:
       parameters:
         - $ref: "#/components/parameters/SandboxId"
       responses:
-        "200":
+        "201":
           description: Sandbox running
+  /sandboxes/{sandboxId}/connect:
+    post:
+      summary: Return a running sandbox, resuming it when paused
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [timeout]
+              properties:
+                timeout:
+                  type: integer
+                  minimum: 0
+      responses:
+        "200":
+          description: Sandbox was already running
+        "201":
+          description: Sandbox was resumed
   /sandboxes/{sandboxId}/snapshots:
     post:
       summary: Capture a filesystem snapshot
@@ -203,8 +286,60 @@ paths:
                   type: [integer, "null"]
                   minimum: 1
       responses:
+        "204":
+          description: Timeout updated
+  /sandboxes/{sandboxId}/network:
+    put:
+      summary: Replace sandbox network policy
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                allowInternetAccess:
+                  type: boolean
+                allowOut:
+                  type: array
+                  items:
+                    type: string
+                denyOut:
+                  type: array
+                  items:
+                    type: string
+      responses:
         "200":
-          description: Updated sandbox
+          description: Network policy updated
+  /sandboxes/{sandboxId}/resources:
+    put:
+      summary: Update Docker CPU, memory and PID limits
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cpuCount:
+                  type: number
+                  exclusiveMinimum: 0
+                memoryMB:
+                  type: integer
+                  minimum: 128
+                diskSizeMB:
+                  type: integer
+                  minimum: 0
+                pidsLimit:
+                  type: integer
+                  minimum: 1
+      responses:
+        "200":
+          description: Resource limits updated
   /snapshots:
     get:
       summary: List snapshots

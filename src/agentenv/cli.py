@@ -1,11 +1,14 @@
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
 if sys.version_info >= (3, 10):
     from .api import serve
+    from .backend import DockerSandboxBackend, LocalProcessBackend
+    from .models import NetworkPolicy, ResourceLimits
     from .orchestrator import AgentEnvError, Orchestrator
 
 
@@ -23,6 +26,17 @@ def _parser():
     )
     parser.add_argument(
         "--data-dir", default=".agentenv", help="runtime data directory"
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("local", "docker"),
+        default=os.environ.get("AENV_BACKEND", "local"),
+        help="sandbox runtime backend",
+    )
+    parser.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="Docker backend: do not pull missing OCI images",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -47,6 +61,15 @@ def _parser():
     start.add_argument("template")
     start.add_argument("--timeout", type=int)
     start.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
+    _add_runtime_options(start)
+
+    cold = commands.add_parser(
+        "cold-start", help="start directly from an OCI image (Docker)"
+    )
+    cold.add_argument("image")
+    cold.add_argument("--timeout", type=int)
+    cold.add_argument("--env", action="append", default=[], metavar="KEY=VALUE")
+    _add_runtime_options(cold)
 
     commands.add_parser("list", aliases=["ls"], help="list sandboxes")
     inspect = commands.add_parser("inspect", help="show one sandbox")
@@ -79,12 +102,42 @@ def _parser():
     timeout_group.add_argument("--seconds", type=int)
     timeout_group.add_argument("--clear", action="store_true")
 
+    network = commands.add_parser("network", help="replace network policy")
+    network.add_argument("sandbox_id")
+    internet = network.add_mutually_exclusive_group()
+    internet.add_argument("--internet", action="store_true")
+    internet.add_argument("--no-internet", action="store_true")
+    network.add_argument("--allow-out", action="append", default=[])
+    network.add_argument("--deny-out", action="append", default=[])
+
+    resources = commands.add_parser("resources", help="update runtime limits")
+    resources.add_argument("sandbox_id")
+    _add_resource_options(resources)
+
     events = commands.add_parser("events", help="show lifecycle audit events")
     events.add_argument("--limit", type=int, default=20)
     commands.add_parser("status", help="show runtime summary")
     commands.add_parser("gc", help="remove expired sandboxes now")
     commands.add_parser("demo", help="run the complete core lifecycle")
     return parser
+
+
+def _add_resource_options(parser):
+    parser.add_argument("--cpus", type=float, default=1.0)
+    parser.add_argument("--memory-mb", type=int, default=512)
+    parser.add_argument("--disk-mb", type=int, default=0)
+    parser.add_argument("--pids-limit", type=int, default=256)
+
+
+def _add_runtime_options(parser):
+    _add_resource_options(parser)
+    parser.add_argument("--no-internet", action="store_true")
+    parser.add_argument("--allow-out", action="append", default=[])
+    parser.add_argument("--deny-out", action="append", default=[])
+    parser.add_argument(
+        "--on-timeout", choices=("kill", "pause"), default="kill"
+    )
+    parser.add_argument("--auto-resume", action="store_true")
 
 
 def _env(values):
@@ -97,9 +150,27 @@ def _env(values):
     return result
 
 
+def _resources(args):
+    return ResourceLimits(
+        cpu_count=args.cpus,
+        memory_mb=args.memory_mb,
+        disk_size_mb=args.disk_mb,
+        pids_limit=args.pids_limit,
+    )
+
+
+def _network(args):
+    return NetworkPolicy(
+        allow_internet_access=not args.no_internet,
+        allow_out=args.allow_out,
+        deny_out=args.deny_out,
+    )
+
+
 def _demo(orchestrator):
+    source = "python:3.12-alpine" if orchestrator.backend.name == "docker" else "python:local"
     try:
-        template = orchestrator.create_template("demo", source="python:local")
+        template = orchestrator.create_template("demo", source=source)
     except AgentEnvError:
         template = orchestrator.store.get_template("demo")
         assert template
@@ -140,7 +211,12 @@ def main(argv=None):
         )
         return 2
     args = _parser().parse_args(argv)
-    orchestrator = Orchestrator(Path(args.data_dir))
+    backend = (
+        DockerSandboxBackend(pull_missing=not args.no_pull)
+        if args.backend == "docker"
+        else LocalProcessBackend()
+    )
+    orchestrator = Orchestrator(Path(args.data_dir), backend=backend)
     try:
         if args.command == "serve":
             if args.maintenance_interval <= 0:
@@ -172,6 +248,22 @@ def main(argv=None):
                     args.template,
                     env=_env(args.env),
                     timeout_seconds=args.timeout,
+                    resources=_resources(args),
+                    network=_network(args),
+                    timeout_action=args.on_timeout,
+                    auto_resume=args.auto_resume,
+                )
+            )
+        elif args.command == "cold-start":
+            _print(
+                orchestrator.create_cold_sandbox(
+                    args.image,
+                    env=_env(args.env),
+                    timeout_seconds=args.timeout,
+                    resources=_resources(args),
+                    network=_network(args),
+                    timeout_action=args.on_timeout,
+                    auto_resume=args.auto_resume,
                 )
             )
         elif args.command in ("list", "ls"):
@@ -211,6 +303,24 @@ def main(argv=None):
             _print(
                 orchestrator.update_timeout(
                     args.sandbox_id, None if args.clear else args.seconds
+                )
+            )
+        elif args.command == "network":
+            allow_internet = args.internet or not args.no_internet
+            _print(
+                orchestrator.update_network(
+                    args.sandbox_id,
+                    NetworkPolicy(
+                        allow_internet_access=allow_internet,
+                        allow_out=args.allow_out,
+                        deny_out=args.deny_out,
+                    ),
+                )
+            )
+        elif args.command == "resources":
+            _print(
+                orchestrator.update_resources(
+                    args.sandbox_id, _resources(args)
                 )
             )
         elif args.command == "events":

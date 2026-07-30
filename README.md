@@ -1,39 +1,40 @@
 # AgentENV Python
 
-一个用 Python 表达 AgentENV 核心设计的轻量实现，优先展示完整、可运行的
-沙箱生命周期：
+用 Python 表达 AgentENV 核心设计的轻量实现，覆盖完整沙箱生命周期：
 
 ```text
-Template → Sandbox → Exec → Pause/Resume → Snapshot/Restore/Fork → Delete
+OCI/Template → Sandbox → Exec → Pause/Resume
+             → Snapshot/Restore/Fork → Delete
 ```
 
-它参考 AgentENV 的领域划分，保留“编排器 + 可替换后端 + 元数据持久化 +
-HTTP/CLI”的结构。当前后端使用工作目录和本机子进程，因此可以在 macOS
-和 Linux 上直接运行，不依赖 Firecracker、KVM 或第三方 Python 包。
+项目采用“编排器 + 可替换后端 + 元数据持久化 + HTTP/CLI”的结构。可以使用
+本机进程后端快速理解流程，也可以使用 Docker 后端获得容器隔离、OCI 镜像、
+资源限制和真实的 pause/resume。
 
 > [!WARNING]
-> `LocalProcessBackend` 不是安全沙箱。命令使用当前用户权限在本机执行，
-> 请勿暴露到公网或处理不可信输入。
+> `LocalProcessBackend` 不是安全沙箱。Docker 后端也不能替代经过加固的
+> 多租户隔离方案。不要把未配置认证的服务暴露到公网。
 
 ## 已实现
 
-- 模板创建、查询和安全删除；
-- 从模板或快照创建沙箱；
-- 命令执行、超时和退出码；
-- 暂停、恢复、快照、恢复和批量分叉；
-- 沙箱 TTL 更新、手动清理和服务端自动回收；
-- JSON 原子持久化和重启后的中断状态协调；
-- 生命周期审计事件与运行状态汇总；
-- 零依赖 HTTP API 和命令行；
+- Local 与 Docker 两种运行时后端；
+- Docker Hub、私有 Registry、tag 和 digest 形式的 OCI 引用解析；
+- OCI 镜像检查，缺失时可自动 `docker pull`；
+- CPU、内存、PID 限制以及磁盘配额元数据；
+- 完全断网/恢复联网和 allow/deny 网络策略持久化；
+- 模板、沙箱、命令、暂停、恢复、快照、恢复、分叉和删除；
+- TTL kill/pause、auto-resume、手动清理和服务端后台维护；
+- JSON 原子持久化、中断操作恢复和生命周期审计事件；
+- E2B 风格的控制面字段、状态码和生命周期接口；
 - Python 3.10–3.12 自动化测试。
 
-## 快速开始
+## 本机后端快速开始
 
-需要 Python 3.10 或更高版本。本机默认的 `python3` 可能仍指向 Python
-3.6，因此示例显式使用 `python3.10`。
+需要 Python 3.10+，运行时无第三方 Python 依赖。
 
 ```bash
 make demo
+make test
 ```
 
 等价命令：
@@ -43,73 +44,122 @@ PYTHONPATH=src python3.10 -m agentenv \
   --data-dir /tmp/agentenv-py-demo demo
 ```
 
-测试：
+## Docker 后端
+
+先确保 Docker Desktop 或 Docker Engine 正在运行：
 
 ```bash
-make test
+docker info
 ```
 
-也可以安装为本地命令：
-
-```bash
-python3.10 -m pip install -e .
-aenv-py --data-dir /tmp/agentenv-py-demo demo
-```
-
-## 分步体验
-
-以下命令默认使用仓库下的 `.agentenv/` 保存状态：
+创建 OCI 模板和受限沙箱。全局参数 `--backend docker` 要放在子命令前：
 
 ```bash
 export PYTHONPATH=src
 
-python3.10 -m agentenv template-create ubuntu --source ubuntu:22.04
-python3.10 -m agentenv start ubuntu --timeout 600 --env NAME=AgentENV
-python3.10 -m agentenv exec <sandbox-id> \
-  'echo "hello $NAME" > hello.txt && cat hello.txt'
+python3.10 -m agentenv --backend docker \
+  template-create alpine --source alpine:3.20
 
-python3.10 -m agentenv pause <sandbox-id>
-python3.10 -m agentenv resume <sandbox-id>
-python3.10 -m agentenv snapshot <sandbox-id>
-python3.10 -m agentenv restore <snapshot-id>
-python3.10 -m agentenv fork <sandbox-id> --count 2
-
-python3.10 -m agentenv timeout <sandbox-id> --seconds 1200
-python3.10 -m agentenv status
-python3.10 -m agentenv events --limit 20
-python3.10 -m agentenv delete <sandbox-id>
+python3.10 -m agentenv --backend docker start alpine \
+  --timeout 600 \
+  --cpus 1.5 \
+  --memory-mb 256 \
+  --pids-limit 128 \
+  --disk-mb 1024 \
+  --no-internet \
+  --on-timeout pause \
+  --auto-resume
 ```
 
-`--source ubuntu:22.04` 当前记录模板来源，但不会拉取 OCI 镜像。使用
-`--base-dir ./some-directory` 可以把一个本机目录作为模板初始文件系统。
-
-## HTTP API
-
-启动服务器：
+也可以绕过模板，直接冷启动一个 OCI 镜像：
 
 ```bash
-make serve
+python3.10 -m agentenv --backend docker \
+  cold-start ghcr.io/example/agent:latest --memory-mb 512
 ```
 
-服务默认监听 `http://127.0.0.1:8000`。启动后后台维护线程会自动删除 TTL
-到期的沙箱。
+运行与动态更新：
 
 ```bash
-curl -X POST http://127.0.0.1:8000/templates \
-  -H 'content-type: application/json' \
-  -d '{"name":"demo","source":"scratch"}'
+python3.10 -m agentenv --backend docker exec <sandbox-id> \
+  'cat /etc/os-release && echo hello > hello.txt'
 
+python3.10 -m agentenv --backend docker resources <sandbox-id> \
+  --cpus 2 --memory-mb 512 --pids-limit 256
+
+python3.10 -m agentenv --backend docker network <sandbox-id> --no-internet
+python3.10 -m agentenv --backend docker network <sandbox-id> --internet
+
+python3.10 -m agentenv --backend docker pause <sandbox-id>
+python3.10 -m agentenv --backend docker resume <sandbox-id>
+python3.10 -m agentenv --backend docker snapshot <sandbox-id>
+```
+
+Docker 后端把 `/workspace` 绑定到宿主机沙箱目录。快照会复制该工作区，不会
+捕获容器镜像层中 `/workspace` 之外的改动。`disk_size_mb` 当前作为调度和
+接口元数据保存，因为 Docker bind mount 没有跨平台的目录配额能力。
+
+### 网络策略边界
+
+`allow_internet_access=false` 或 `deny_out=["0.0.0.0/0"]` 会真实断开容器
+网络；恢复联网会重新连接 Docker `bridge` 网络。`allow_out` 和更细粒度的
+`deny_out` 会经过格式验证、持久化并出现在 API 中，但 Docker CLI 后端暂不
+使用 iptables/eBPF 强制逐条执行。`SandboxBackend.update_network` 已提供
+独立边界，可以继续接入平台级网络执行器。
+
+## HTTP 与 E2B 控制面兼容
+
+启动本机或 Docker API：
+
+```bash
+PYTHONPATH=src python3.10 -m agentenv \
+  --backend docker \
+  --data-dir /tmp/agentenv-docker \
+  serve
+```
+
+E2B 风格模板启动：
+
+```bash
 curl -X POST http://127.0.0.1:8000/sandboxes \
   -H 'content-type: application/json' \
-  -d '{"template_id":"demo","timeout_seconds":600}'
-
-curl -X POST http://127.0.0.1:8000/sandboxes/<sandbox-id>/exec \
-  -H 'content-type: application/json' \
-  -d '{"command":"printf hello"}'
-
-curl http://127.0.0.1:8000/status
-curl 'http://127.0.0.1:8000/events?limit=20'
+  -d '{
+    "templateID": "alpine",
+    "timeout": 600,
+    "envVars": {"NAME": "AgentENV"},
+    "cpuCount": 1,
+    "memoryMB": 256,
+    "lifecycle": {"onTimeout": "pause", "autoResume": true},
+    "allow_internet_access": false
+  }'
 ```
+
+冷启动与生命周期：
+
+```bash
+curl -X POST http://127.0.0.1:8000/sandboxes-cold \
+  -H 'content-type: application/json' \
+  -d '{"image":"alpine:3.20","timeout":300}'
+
+curl -X POST http://127.0.0.1:8000/sandboxes/<id>/pause
+curl -X POST http://127.0.0.1:8000/sandboxes/<id>/connect \
+  -H 'content-type: application/json' -d '{"timeout":300}'
+curl -X POST http://127.0.0.1:8000/sandboxes/<id>/timeout \
+  -H 'content-type: application/json' -d '{"timeout":600}'
+curl http://127.0.0.1:8000/v2/sandboxes
+```
+
+已兼容的是 E2B 控制面生命周期：create/list/get/kill、pause/connect、
+timeout、fork 和 cold start，以及 `sandboxID/templateID/startedAt/endAt`
+等响应字段。官方 SDK 的 `commands`、`files`、PTY 和端口代理会连接沙箱内
+controller/envd 的独立 ConnectRPC/WebSocket 接口；本项目目前只提供
+`POST /sandboxes/{id}/exec` 扩展，因此尚不能宣称完整 SDK 零改动兼容。
+
+相关官方说明：
+
+- [E2B sandbox lifecycle](https://e2b.dev/docs/sandbox)
+- [E2B persistence and connect](https://e2b.dev/docs/sandbox/persistence)
+- [E2B sandbox controller](https://e2b.dev/docs/sandbox/secured-access)
 
 完整接口契约见 [docs/openapi.yaml](docs/openapi.yaml)。
 
@@ -117,29 +167,26 @@ curl 'http://127.0.0.1:8000/events?limit=20'
 
 ```text
 src/agentenv/
-├── models.py        # Template/Sandbox/Snapshot/Event 数据模型
+├── models.py        # 模板、资源、网络、沙箱、快照和事件
+├── oci.py           # OCI 引用解析与 Docker 镜像解析
+├── backend.py       # LocalProcessBackend / DockerSandboxBackend
+├── orchestrator.py  # 状态机、回滚、恢复、TTL 和策略更新
+├── e2b.py           # E2B 请求/响应适配
 ├── store.py         # JSON 元数据原子持久化
-├── backend.py       # 可替换运行时接口和本机后端
-├── orchestrator.py  # 生命周期状态机、回滚、恢复和 TTL
 ├── api.py           # HTTP API 与后台维护
-├── cli.py           # 命令行和端到端 Demo
-└── __main__.py      # python -m agentenv 入口
+└── cli.py           # CLI 与端到端 Demo
 ```
 
 设计说明见 [docs/architecture.md](docs/architecture.md)。
 
-## 与生产级 AgentENV 的差异
+## 仍然刻意简化的部分
 
-本项目表达核心流程，不以性能或生产隔离为目标：
-
-- 暂停/恢复是逻辑状态转换，不保存进程内存；
-- 快照复制工作目录，不是增量块设备快照；
-- 每次命令执行都是独立子进程；
-- 暂无认证、网络策略、CPU/内存限制和多节点调度；
-- JSON 存储适用于单进程演示，不适合分布式并发。
-
-下一阶段可以实现 `DockerSandboxBackend`，然后补充 OCI 镜像解析、资源限制、
-网络策略和 E2B 兼容层。编排器和 API 无需因底层运行时变化而重写。
+- Docker 快照只包含绑定工作区，不包含内存和完整容器 rootfs；
+- Local 后端暂停/恢复只是逻辑状态转换；
+- 没有 API Key、租户授权和公网流量代理；
+- 细粒度网络列表尚未接入 iptables/eBPF；
+- JSON 存储适合单进程演示，不适合分布式并发；
+- 完整 E2B SDK 兼容还需要沙箱 controller/envd 层。
 
 ## 许可证
 

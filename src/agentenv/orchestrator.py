@@ -12,6 +12,8 @@ from .backend import LocalProcessBackend, SandboxBackend
 from .models import (
     CommandResult,
     LifecycleEvent,
+    NetworkPolicy,
+    ResourceLimits,
     Sandbox,
     SandboxState,
     Snapshot,
@@ -62,6 +64,13 @@ class Orchestrator:
         self.backend = backend or LocalProcessBackend()
         self._lock = RLock()
         self.recover_interrupted_operations()
+
+    def _ensure_backend(self, sandbox: Sandbox) -> None:
+        if sandbox.backend != self.backend.name:
+            raise ConflictError(
+                f"sandbox uses backend {sandbox.backend}, "
+                f"but this process uses {self.backend.name}"
+            )
 
     def _event(
         self,
@@ -142,6 +151,11 @@ class Orchestrator:
                 workdir=workdir,
                 created_at=_now(),
             )
+            try:
+                template = self.backend.prepare_template(template)
+            except Exception:
+                shutil.rmtree(rootfs.parent, ignore_errors=True)
+                raise
             self.store.put_template(template)
             self._event(
                 "template_created",
@@ -185,6 +199,10 @@ class Orchestrator:
         env: dict[str, str] | None = None,
         timeout_seconds: int | None = None,
         metadata: dict[str, str] | None = None,
+        resources: ResourceLimits | dict[str, Any] | None = None,
+        network: NetworkPolicy | dict[str, Any] | None = None,
+        timeout_action: str | None = None,
+        auto_resume: bool | None = None,
     ) -> Sandbox:
         with self._lock:
             if timeout_seconds is not None and timeout_seconds <= 0:
@@ -201,6 +219,16 @@ class Orchestrator:
                     snapshot.workdir,
                     f"snapshot:{snapshot.id}",
                 )
+                if snapshot.backend != self.backend.name:
+                    raise ConflictError(
+                        f"snapshot uses backend {snapshot.backend}, "
+                        f"but this process uses {self.backend.name}"
+                    )
+                base_resources = snapshot.resources
+                base_network = snapshot.network
+                image_ref = snapshot.image_ref
+                base_timeout_action = snapshot.timeout_action
+                base_auto_resume = snapshot.auto_resume
             else:
                 template = self.store.get_template(template_id or "")
                 if not template:
@@ -210,6 +238,35 @@ class Orchestrator:
                     template.workdir,
                     template.id,
                 )
+                base_resources = ResourceLimits()
+                base_network = NetworkPolicy()
+                image_ref = template.image_ref
+                base_timeout_action = "kill"
+                base_auto_resume = False
+            resolved_timeout_action = timeout_action or base_timeout_action
+            resolved_auto_resume = (
+                base_auto_resume if auto_resume is None else auto_resume
+            )
+            if resolved_timeout_action not in ("kill", "pause"):
+                raise AgentEnvError("timeout_action must be kill or pause")
+            if resolved_auto_resume and resolved_timeout_action != "pause":
+                raise AgentEnvError("auto_resume requires timeout_action=pause")
+            resolved_resources = (
+                resources
+                if isinstance(resources, ResourceLimits)
+                else ResourceLimits.from_dict(resources)
+                if resources is not None
+                else base_resources
+            )
+            resolved_resources.validate()
+            resolved_network = (
+                network
+                if isinstance(network, NetworkPolicy)
+                else NetworkPolicy.from_dict(network)
+                if network is not None
+                else base_network
+            )
+            resolved_network.validate()
             now = _now()
             sandbox_id = _id("sbx")
             timeout_at = None
@@ -226,6 +283,13 @@ class Orchestrator:
                 workdir=workdir,
                 timeout_at=timeout_at,
                 metadata=metadata or {},
+                backend=self.backend.name,
+                image_ref=image_ref,
+                resources=resolved_resources,
+                network=resolved_network,
+                timeout_action=resolved_timeout_action,
+                auto_resume=resolved_auto_resume,
+                timeout_seconds=timeout_seconds,
                 created_at=now,
                 updated_at=now,
             )
@@ -270,6 +334,13 @@ class Orchestrator:
         self, sandbox_id: str, command: str, timeout: float | None = None
     ) -> CommandResult:
         sandbox = self.get_sandbox(sandbox_id)
+        self._ensure_backend(sandbox)
+        if sandbox.state == SandboxState.PAUSED and sandbox.auto_resume:
+            sandbox = self.resume(sandbox.id)
+            if sandbox.timeout_seconds:
+                sandbox = self.update_timeout(
+                    sandbox.id, sandbox.timeout_seconds
+                )
         if sandbox.state != SandboxState.RUNNING:
             raise AgentEnvError(
                 f"sandbox {sandbox_id} is {sandbox.state.value}; execution requires running"
@@ -288,6 +359,7 @@ class Orchestrator:
     def pause(self, sandbox_id: str) -> Sandbox:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
+            self._ensure_backend(sandbox)
             if sandbox.state == SandboxState.PAUSED:
                 return sandbox
             if sandbox.state != SandboxState.RUNNING:
@@ -295,13 +367,14 @@ class Orchestrator:
             with self._transition(
                 sandbox, SandboxState.PAUSING, SandboxState.PAUSED
             ):
-                pass
+                self.backend.pause(sandbox)
             self._event("sandbox_paused", "sandbox", sandbox.id)
             return sandbox
 
     def resume(self, sandbox_id: str) -> Sandbox:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
+            self._ensure_backend(sandbox)
             if sandbox.state == SandboxState.RUNNING:
                 return sandbox
             if sandbox.state != SandboxState.PAUSED:
@@ -309,14 +382,14 @@ class Orchestrator:
             with self._transition(
                 sandbox, SandboxState.RESUMING, SandboxState.RUNNING
             ):
-                if not Path(sandbox.workspace_path).exists():
-                    raise AgentEnvError("paused workspace is missing")
+                self.backend.resume(sandbox)
             self._event("sandbox_resumed", "sandbox", sandbox.id)
             return sandbox
 
     def snapshot(self, sandbox_id: str) -> Snapshot:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
+            self._ensure_backend(sandbox)
             if sandbox.state != SandboxState.RUNNING:
                 raise AgentEnvError("only a running sandbox can be snapshotted")
             snapshot_id = _id("snp")
@@ -331,6 +404,12 @@ class Orchestrator:
                     rootfs_path=str(rootfs),
                     env=dict(sandbox.env),
                     workdir=sandbox.workdir,
+                    backend=sandbox.backend,
+                    image_ref=sandbox.image_ref,
+                    resources=sandbox.resources,
+                    network=sandbox.network,
+                    timeout_action=sandbox.timeout_action,
+                    auto_resume=sandbox.auto_resume,
                     created_at=_now(),
                 )
                 self.store.put_snapshot(snapshot)
@@ -380,6 +459,7 @@ class Orchestrator:
             raise AgentEnvError("count must be at least 1")
         with self._lock:
             source = self.get_sandbox(sandbox_id)
+            self._ensure_backend(source)
             if source.state != SandboxState.RUNNING:
                 raise AgentEnvError("only a running sandbox can be forked")
             children: list[Sandbox] = []
@@ -395,6 +475,12 @@ class Orchestrator:
                     rootfs_path=str(rootfs),
                     env=dict(source.env),
                     workdir=source.workdir,
+                    backend=source.backend,
+                    image_ref=source.image_ref,
+                    resources=source.resources,
+                    network=source.network,
+                    timeout_action=source.timeout_action,
+                    auto_resume=source.auto_resume,
                     created_at=_now(),
                 )
                 self.store.put_snapshot(snapshot)
@@ -419,6 +505,7 @@ class Orchestrator:
     def delete(self, sandbox_id: str) -> None:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
+            self._ensure_backend(sandbox)
             previous = sandbox.state
             sandbox.state = SandboxState.KILLING
             sandbox.updated_at = _now()
@@ -452,6 +539,7 @@ class Orchestrator:
                 if timeout_seconds is not None
                 else None
             )
+            sandbox.timeout_seconds = timeout_seconds
             sandbox.updated_at = _now()
             self.store.put_sandbox(sandbox)
             self._event(
@@ -462,12 +550,107 @@ class Orchestrator:
             )
             return sandbox
 
+    def update_network(
+        self, sandbox_id: str, policy: NetworkPolicy | dict[str, Any]
+    ) -> Sandbox:
+        with self._lock:
+            sandbox = self.get_sandbox(sandbox_id)
+            self._ensure_backend(sandbox)
+            if sandbox.state != SandboxState.RUNNING:
+                raise ConflictError("network can only be updated while running")
+            resolved = (
+                policy
+                if isinstance(policy, NetworkPolicy)
+                else NetworkPolicy.from_dict(policy)
+            )
+            resolved.validate()
+            self.backend.update_network(sandbox, resolved)
+            sandbox.network = resolved
+            sandbox.updated_at = _now()
+            self.store.put_sandbox(sandbox)
+            self._event(
+                "sandbox_network_updated",
+                "sandbox",
+                sandbox.id,
+                network=resolved.__dict__,
+            )
+            return sandbox
+
+    def update_resources(
+        self, sandbox_id: str, resources: ResourceLimits | dict[str, Any]
+    ) -> Sandbox:
+        with self._lock:
+            sandbox = self.get_sandbox(sandbox_id)
+            self._ensure_backend(sandbox)
+            if sandbox.state != SandboxState.RUNNING:
+                raise ConflictError("resources can only be updated while running")
+            resolved = (
+                resources
+                if isinstance(resources, ResourceLimits)
+                else ResourceLimits.from_dict(resources)
+            )
+            resolved.validate()
+            self.backend.update_resources(sandbox, resolved)
+            sandbox.resources = resolved
+            sandbox.updated_at = _now()
+            self.store.put_sandbox(sandbox)
+            self._event(
+                "sandbox_resources_updated",
+                "sandbox",
+                sandbox.id,
+                resources=resolved.__dict__,
+            )
+            return sandbox
+
+    def create_cold_sandbox(
+        self,
+        image: str,
+        *,
+        timeout_seconds: int | None = None,
+        env: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
+        resources: ResourceLimits | dict[str, Any] | None = None,
+        network: NetworkPolicy | dict[str, Any] | None = None,
+        timeout_action: str = "kill",
+        auto_resume: bool = False,
+    ) -> Sandbox:
+        if self.backend.name != "docker":
+            raise ConflictError("cold OCI sandbox creation requires the Docker backend")
+        template = self.create_template(
+            name=f"cold-{uuid4().hex[:10]}",
+            source=image,
+        )
+        return self.create_sandbox(
+            template.id,
+            timeout_seconds=timeout_seconds,
+            env=env,
+            metadata=metadata,
+            resources=resources,
+            network=network,
+            timeout_action=timeout_action,
+            auto_resume=auto_resume,
+        )
+
     def evict_expired(self) -> list[str]:
         now = datetime.now(timezone.utc)
         evicted = []
         for sandbox in self.list_sandboxes():
-            if sandbox.timeout_at and datetime.fromisoformat(sandbox.timeout_at) <= now:
-                self.delete(sandbox.id)
+            if (
+                sandbox.backend == self.backend.name
+                and sandbox.timeout_at
+                and datetime.fromisoformat(sandbox.timeout_at) <= now
+            ):
+                if sandbox.timeout_action == "pause":
+                    self.pause(sandbox.id)
+                    paused = self.get_sandbox(sandbox.id)
+                    paused.timeout_at = None
+                    paused.updated_at = _now()
+                    self.store.put_sandbox(paused)
+                    self._event(
+                        "sandbox_auto_paused", "sandbox", sandbox.id
+                    )
+                else:
+                    self.delete(sandbox.id)
                 evicted.append(sandbox.id)
         return evicted
 
@@ -494,8 +677,7 @@ class Orchestrator:
         """
         Reconcile durable transitional states left behind by a process crash.
 
-        The local backend has no resident VM process, so an existing workspace
-        is enough to return an interrupted operation to RUNNING.
+        The selected backend decides whether the durable runtime still exists.
         """
         recovered: list[str] = []
         transitional = {
@@ -510,9 +692,11 @@ class Orchestrator:
             if sandbox.state not in transitional:
                 continue
             previous = sandbox.state
-            workspace_exists = Path(sandbox.workspace_path).exists()
-            if previous == SandboxState.KILLING or not workspace_exists:
-                if workspace_exists:
+            if sandbox.backend != self.backend.name:
+                continue
+            runtime_alive = self.backend.runtime_alive(sandbox)
+            if previous == SandboxState.KILLING or not runtime_alive:
+                if runtime_alive:
                     self.backend.destroy(sandbox)
                 self.store.delete_sandbox(sandbox.id)
                 action = "removed"

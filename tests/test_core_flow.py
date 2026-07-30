@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agentenv.models import SandboxState
+from agentenv.models import NetworkPolicy, SandboxState
 from agentenv.orchestrator import AgentEnvError, ConflictError, Orchestrator
 
 
@@ -114,6 +114,38 @@ class CoreFlowTest(unittest.TestCase):
             if event.type == "sandbox_recovered"
         )
         self.assertEqual("snapshotting", recovery.details["interrupted_state"])
+
+    def test_timeout_can_pause_and_auto_resume(self) -> None:
+        template = self.orchestrator.create_template("auto-resume")
+        sandbox = self.orchestrator.create_sandbox(
+            template.id,
+            timeout_seconds=60,
+            timeout_action="pause",
+            auto_resume=True,
+        )
+        sandbox.timeout_at = (
+            datetime.now(timezone.utc) - timedelta(seconds=1)
+        ).isoformat()
+        self.orchestrator.store.put_sandbox(sandbox)
+        self.orchestrator.evict_expired()
+        self.assertEqual(
+            SandboxState.PAUSED,
+            self.orchestrator.get_sandbox(sandbox.id).state,
+        )
+
+        result = self.orchestrator.execute(sandbox.id, "printf resumed")
+        self.assertEqual("resumed", result.stdout)
+        resumed = self.orchestrator.get_sandbox(sandbox.id)
+        self.assertEqual(SandboxState.RUNNING, resumed.state)
+        self.assertIsNotNone(resumed.timeout_at)
+
+    def test_network_policy_validation(self) -> None:
+        template = self.orchestrator.create_template("network-validation")
+        with self.assertRaises(ValueError):
+            self.orchestrator.create_sandbox(
+                template.id,
+                network=NetworkPolicy(deny_out=["example.com"]),
+            )
 
 
 if __name__ == "__main__":

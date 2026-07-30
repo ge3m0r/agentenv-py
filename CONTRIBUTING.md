@@ -11,6 +11,12 @@ make test
 make demo
 ```
 
+Docker Desktop/Engine 可用时，还可以运行：
+
+```bash
+make docker-demo
+```
+
 提交前请确保：
 
 - 新行为有对应测试；

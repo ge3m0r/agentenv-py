@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.agentenv/
+.venv/
+*.egg-info/
+build/
+dist/
+/AGENTS.md
+/sources/

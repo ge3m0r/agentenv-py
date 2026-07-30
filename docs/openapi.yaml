@@ -1,0 +1,256 @@
+openapi: 3.1.0
+info:
+  title: AgentENV Python API
+  version: 0.2.0
+  description: Core sandbox lifecycle API for the AgentENV Python prototype.
+servers:
+  - url: http://127.0.0.1:8000
+paths:
+  /health:
+    get:
+      summary: Health check and runtime summary
+      responses:
+        "200":
+          description: Healthy
+  /status:
+    get:
+      summary: Get resource counts and backend information
+      responses:
+        "200":
+          description: Runtime status
+  /events:
+    get:
+      summary: List lifecycle audit events
+      parameters:
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            default: 100
+      responses:
+        "200":
+          description: Newest events first
+  /templates:
+    get:
+      summary: List templates
+      responses:
+        "200":
+          description: Template list
+    post:
+      summary: Create a template
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                source:
+                  type: string
+                  default: scratch
+                base_dir:
+                  type: string
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+                workdir:
+                  type: string
+                  default: .
+      responses:
+        "201":
+          description: Template created
+  /templates/{templateId}:
+    delete:
+      summary: Delete an unused template
+      parameters:
+        - $ref: "#/components/parameters/TemplateId"
+      responses:
+        "200":
+          description: Template deleted
+        "409":
+          description: Template is in use
+  /sandboxes:
+    get:
+      summary: List sandboxes
+      responses:
+        "200":
+          description: Sandbox list
+    post:
+      summary: Create from exactly one template or snapshot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                template_id:
+                  type: string
+                snapshot_id:
+                  type: string
+                timeout_seconds:
+                  type: integer
+                  minimum: 1
+                env:
+                  type: object
+                  additionalProperties:
+                    type: string
+                metadata:
+                  type: object
+                  additionalProperties:
+                    type: string
+      responses:
+        "201":
+          description: Sandbox running
+  /sandboxes/{sandboxId}:
+    get:
+      summary: Inspect a sandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      responses:
+        "200":
+          description: Sandbox metadata
+        "404":
+          description: Sandbox not found
+    delete:
+      summary: Delete a sandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      responses:
+        "200":
+          description: Sandbox deleted
+  /sandboxes/{sandboxId}/exec:
+    post:
+      summary: Execute a shell command
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command:
+                  type: string
+                timeout:
+                  type: number
+                  exclusiveMinimum: 0
+      responses:
+        "200":
+          description: Command result
+  /sandboxes/{sandboxId}/pause:
+    post:
+      summary: Pause a running sandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      responses:
+        "200":
+          description: Sandbox paused
+  /sandboxes/{sandboxId}/resume:
+    post:
+      summary: Resume a paused sandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      responses:
+        "200":
+          description: Sandbox running
+  /sandboxes/{sandboxId}/snapshots:
+    post:
+      summary: Capture a filesystem snapshot
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      responses:
+        "201":
+          description: Snapshot created
+  /sandboxes/{sandboxId}/fork:
+    post:
+      summary: Fork a running sandbox
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                count:
+                  type: integer
+                  minimum: 1
+                  default: 1
+      responses:
+        "201":
+          description: Running child sandboxes
+  /sandboxes/{sandboxId}/timeout:
+    post:
+      summary: Update or clear TTL
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout_seconds:
+                  type: [integer, "null"]
+                  minimum: 1
+      responses:
+        "200":
+          description: Updated sandbox
+  /snapshots:
+    get:
+      summary: List snapshots
+      responses:
+        "200":
+          description: Snapshot list
+  /snapshots/{snapshotId}:
+    get:
+      summary: Inspect a snapshot
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+      responses:
+        "200":
+          description: Snapshot metadata
+    delete:
+      summary: Delete an unused snapshot
+      parameters:
+        - $ref: "#/components/parameters/SnapshotId"
+      responses:
+        "200":
+          description: Snapshot deleted
+        "409":
+          description: Snapshot is in use
+  /maintenance/evict:
+    post:
+      summary: Remove expired sandboxes immediately
+      responses:
+        "200":
+          description: IDs of evicted sandboxes
+components:
+  parameters:
+    TemplateId:
+      in: path
+      name: templateId
+      required: true
+      schema:
+        type: string
+    SandboxId:
+      in: path
+      name: sandboxId
+      required: true
+      schema:
+        type: string
+    SnapshotId:
+      in: path
+      name: snapshotId
+      required: true
+      schema:
+        type: string

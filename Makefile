@@ -17,4 +17,4 @@ serve:
 	PYTHONPATH=src $(PYTHON) -m agentenv --backend $(BACKEND) --data-dir $(DATA_DIR) serve
 
 clean:
-	find src tests -type d -name __pycache__ -prune -exec rm -r {} +
+	find src tests examples -type d -name __pycache__ -prune -exec rm -r {} +

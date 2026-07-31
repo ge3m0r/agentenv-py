@@ -163,6 +163,10 @@ controller/envd 的独立 ConnectRPC/WebSocket 接口；本项目目前只提供
 
 完整接口契约见 [docs/openapi.yaml](docs/openapi.yaml)。
 
+从启动服务到 Sandbox 创建、命令执行、暂停恢复、资源网络策略、快照分叉和
+Python 客户端的完整调用示例，见
+[E2B 兼容 API 调用指南](docs/e2b-api-guide.md)。
+
 ## 项目结构
 
 ```text

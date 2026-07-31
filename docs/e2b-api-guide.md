@@ -10,11 +10,11 @@
 - CPU、内存、PID 和网络策略；
 - E2B 风格的 camelCase 请求与响应字段；
 - 生命周期事件；
-- AgentENV 扩展的同步命令执行和 Local/Docker Filesystem 接口。
+- AgentENV 扩展的同步/后台命令和 Local/Docker Filesystem 接口。
 
 当前尚未实现 Sandbox Controller/envd，因此官方 E2B SDK 的 `files`、PTY、
-流式 commands 和端口代理还不能零修改接入。命令和文件操作暂时使用
-`POST /sandboxes/{sandboxID}/exec` 与 `/files/*` 扩展接口。
+commands 和端口代理还不能零修改接入。命令和文件操作暂时使用
+`/exec`、`/commands/*` 与 `/files/*` 扩展接口。
 
 > 当前服务没有 API Key 认证，只应监听本机或可信网络。
 
@@ -223,6 +223,89 @@ curl -X POST \
 ```
 
 命令超时使用退出码 `124`。
+
+### 后台命令和增量输出
+
+启动后台命令会立即返回命令 ID 和 PID，不会等待命令结束：
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/commands \
+  -H 'content-type: application/json' \
+  -d '{
+    "command": "for i in 1 2 3; do echo $i; sleep 1; done",
+    "background": true
+  }'
+```
+
+增量读取输出。`stdout_offset` 和 `stderr_offset` 是字节游标；响应中的
+`next.stdout`、`next.stderr` 用于下一次请求。`wait_seconds` 可以进行最长
+30 秒的长轮询：
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/commands/<commandID>/output \
+  -H 'content-type: application/json' \
+  -d '{
+    "stdout_offset": 0,
+    "stderr_offset": 0,
+    "wait_seconds": 10
+  }'
+```
+
+响应同时包含便于阅读的 UTF-8 文本和不会损坏二进制数据的 Base64：
+
+```json
+{
+  "stdout": "1\n",
+  "stderr": "",
+  "stdoutBase64": "MQo=",
+  "stderrBase64": "",
+  "next": {"stdout": 2, "stderr": 0}
+}
+```
+
+列出命令、按命令 ID 或 PID 重连：
+
+```bash
+curl http://127.0.0.1:8000/sandboxes/<sandboxID>/commands
+
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/commands/connect \
+  -H 'content-type: application/json' \
+  -d '{"commandID":"<commandID>"}'
+
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/commands/connect \
+  -H 'content-type: application/json' \
+  -d '{"pid":1234}'
+```
+
+写入 stdin、发送信号和等待退出：
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/commands/<commandID>/stdin \
+  -H 'content-type: application/json' \
+  -d '{"data":"hello\n","encoding":"utf-8"}'
+
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/commands/<commandID>/signal \
+  -H 'content-type: application/json' \
+  -d '{"signal":"TERM"}'
+
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/commands/<commandID>/wait \
+  -H 'content-type: application/json' \
+  -d '{"timeout":30}'
+```
+
+也可以设置 `"background": false`，在同一个创建请求中等待完成并取得完整
+输出。该请求只占用当前 HTTP 工作线程，不会阻塞其他 API 请求。
+
+后台命令记录保存在当前服务进程中，可跨 HTTP 客户端断开重连，但服务进程
+重启后不会恢复。暂停 Sandbox 会暂停活动命令，恢复 Sandbox 后继续；删除
+Sandbox 会终止其所有活动命令。
 
 ## 6. Filesystem 文件操作
 

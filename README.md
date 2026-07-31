@@ -27,6 +27,7 @@ OCI/Template → Sandbox → Exec → Pause/Resume
 - JSON 原子持久化、中断操作恢复和生命周期审计事件；
 - E2B 风格的控制面字段、状态码和生命周期接口；
 - Local/Docker 统一 Filesystem 数据面，支持文本、二进制和路径隔离；
+- 可重连的后台 Commands，支持增量输出、stdin、信号和进程生命周期；
 - Python 3.10–3.12 自动化测试。
 
 ## 本机后端快速开始
@@ -153,9 +154,9 @@ curl http://127.0.0.1:8000/v2/sandboxes
 已兼容的是 E2B 控制面生命周期：create/list/get/kill、pause/connect、
 timeout、fork 和 cold start，以及 `sandboxID/templateID/startedAt/endAt`
 等响应字段。官方 SDK 的 `commands`、`files`、PTY 和端口代理会连接沙箱内
-controller/envd 的独立 ConnectRPC/WebSocket 接口；本项目目前只提供
-`POST /sandboxes/{id}/exec` 和 `/files/*` 扩展，因此尚不能宣称完整 SDK
-零改动兼容。
+controller/envd 的独立 ConnectRPC/WebSocket 接口；本项目目前提供
+`/exec`、`/commands/*` 和 `/files/*` 扩展，因此尚不能宣称完整 SDK 零改动
+兼容。
 
 ## E2B 后端（托管沙箱）
 
@@ -241,6 +242,7 @@ src/agentenv/
 ├── orchestrator.py  # 状态机、回滚、恢复、TTL 和策略更新
 ├── e2b.py           # E2B 请求/响应适配
 ├── filesystem.py    # Local/Docker 统一文件数据面与路径隔离
+├── commands.py      # 后台命令、增量输出、stdin、信号和重连
 ├── store.py         # JSON 元数据原子持久化
 ├── api.py           # HTTP API 与后台维护
 └── cli.py           # CLI 与端到端 Demo

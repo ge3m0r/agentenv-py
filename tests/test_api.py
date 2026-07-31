@@ -186,6 +186,67 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(204, status)
         self.assertEqual({}, removed)
 
+    def test_managed_commands_flow(self) -> None:
+        _, template = self.api.dispatch(
+            "POST", "/templates", {"name": "commands-api"}
+        )
+        _, sandbox = self.api.dispatch(
+            "POST", "/sandboxes", {"template_id": template["id"]}
+        )
+        base = f"/sandboxes/{sandbox['id']}/commands"
+
+        status, started = self.api.dispatch(
+            "POST",
+            base,
+            {
+                "command": 'read value; printf "got:%s" "$value"',
+                "background": True,
+            },
+        )
+        self.assertEqual(201, status)
+        command = started["command"]
+        self.assertEqual("running", command["state"])
+
+        status, connected = self.api.dispatch(
+            "POST", f"{base}/connect", {"pid": command["pid"]}
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(command["id"], connected["id"])
+
+        status, _ = self.api.dispatch(
+            "POST",
+            f"{base}/{command['id']}/stdin",
+            {"data": "api\n"},
+        )
+        self.assertEqual(200, status)
+        status, finished = self.api.dispatch(
+            "POST",
+            f"{base}/{command['id']}/wait",
+            {"timeout": 2},
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("exited", finished["state"])
+
+        status, output = self.api.dispatch(
+            "POST",
+            f"{base}/{command['id']}/output",
+            {"stdout_offset": 0, "stderr_offset": 0},
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("got:api", output["stdout"])
+
+        status, listed = self.api.dispatch("GET", base, {})
+        self.assertEqual(200, status)
+        self.assertEqual(command["id"], listed[0]["id"])
+
+        status, foreground = self.api.dispatch(
+            "POST",
+            base,
+            {"command": "printf foreground", "background": False, "timeout": 2},
+        )
+        self.assertEqual(201, status)
+        self.assertEqual("foreground", foreground["output"]["stdout"])
+
     def test_unknown_route(self) -> None:
         status, body = self.api.dispatch("GET", "/missing", {})
         self.assertEqual(404, status)

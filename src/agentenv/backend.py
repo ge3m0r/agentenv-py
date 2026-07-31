@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import shutil
 import subprocess
 import time
@@ -33,6 +34,35 @@ class SandboxBackend(ABC):
         raise FilesystemUnavailableError(
             f"backend {self.name} does not provide a filesystem data plane"
         )
+
+    def start_managed_command(
+        self, sandbox: Sandbox, command_id: str, command: str
+    ) -> tuple[subprocess.Popen[bytes], int]:
+        raise NotImplementedError
+
+    def signal_managed_command(
+        self,
+        sandbox: Sandbox,
+        command_id: str,
+        process: subprocess.Popen[bytes],
+        signal_name: str,
+    ) -> None:
+        raise NotImplementedError
+
+    def pause_managed_command(
+        self, sandbox: Sandbox, process: subprocess.Popen[bytes]
+    ) -> None:
+        return None
+
+    def resume_managed_command(
+        self, sandbox: Sandbox, process: subprocess.Popen[bytes]
+    ) -> None:
+        return None
+
+    def cleanup_managed_command(
+        self, sandbox: Sandbox, command_id: str
+    ) -> None:
+        return None
 
     @abstractmethod
     def create(self, template: Template, sandbox: Sandbox) -> None: ...
@@ -90,6 +120,59 @@ class LocalProcessBackend(SandboxBackend):
 
     def filesystem(self, sandbox: Sandbox) -> WorkspaceFilesystem:
         return WorkspaceFilesystem(sandbox.workspace_path)
+
+    def start_managed_command(
+        self, sandbox: Sandbox, command_id: str, command: str
+    ) -> tuple[subprocess.Popen[bytes], int]:
+        root = Path(sandbox.workspace_path).resolve()
+        working_directory = (root / sandbox.workdir).resolve()
+        if root != working_directory and root not in working_directory.parents:
+            raise ValueError("workdir must stay inside the sandbox workspace")
+        working_directory.mkdir(parents=True, exist_ok=True)
+        environment = os.environ.copy()
+        environment.update(sandbox.env)
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=working_directory,
+            env=environment,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        return process, process.pid
+
+    def signal_managed_command(
+        self,
+        sandbox: Sandbox,
+        command_id: str,
+        process: subprocess.Popen[bytes],
+        signal_name: str,
+    ) -> None:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, getattr(signal, f"SIG{signal_name}"))
+            except ProcessLookupError:
+                pass
+
+    def pause_managed_command(
+        self, sandbox: Sandbox, process: subprocess.Popen[bytes]
+    ) -> None:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGSTOP)
+            except ProcessLookupError:
+                pass
+
+    def resume_managed_command(
+        self, sandbox: Sandbox, process: subprocess.Popen[bytes]
+    ) -> None:
+        if process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
 
     def create(self, template: Template, sandbox: Sandbox) -> None:
         source = Path(template.rootfs_path)
@@ -185,6 +268,7 @@ class DockerBackendError(RuntimeError):
 
 
 DockerRunner = Callable[..., subprocess.CompletedProcess[str]]
+PopenFactory = Callable[..., subprocess.Popen[bytes]]
 
 
 class DockerSandboxBackend(SandboxBackend):
@@ -202,14 +286,108 @@ class DockerSandboxBackend(SandboxBackend):
         # operations and commands running in the container see the same data.
         return WorkspaceFilesystem(sandbox.workspace_path)
 
+    def start_managed_command(
+        self, sandbox: Sandbox, command_id: str, command: str
+    ) -> tuple[subprocess.Popen[bytes], int]:
+        pid_directory = Path(sandbox.workspace_path) / ".agentenv" / "commands"
+        pid_directory.mkdir(parents=True, exist_ok=True)
+        host_pid_file = pid_directory / f"{command_id}.pid"
+        container_pid_file = f"/workspace/.agentenv/commands/{command_id}.pid"
+        arguments = [
+            self.docker_binary,
+            "exec",
+            "-i",
+            "-w",
+            self._container_workdir(sandbox),
+        ]
+        for key, value in sandbox.env.items():
+            arguments.extend(["-e", f"{key}={value}"])
+        arguments.extend(
+            [
+                "-e",
+                f"AGENTENV_COMMAND={command}",
+                "-e",
+                f"AGENTENV_PID_FILE={container_pid_file}",
+                self._runtime_id(sandbox),
+                "/bin/sh",
+                "-lc",
+                'echo "$$" > "$AGENTENV_PID_FILE" && '
+                'exec /bin/sh -lc "$AGENTENV_COMMAND"',
+            ]
+        )
+        process = self.popen_factory(
+            arguments,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        runtime_pid = process.pid
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            try:
+                runtime_pid = int(host_pid_file.read_text().strip())
+                break
+            except (FileNotFoundError, ValueError):
+                if process.poll() is not None:
+                    break
+                time.sleep(0.01)
+        return process, runtime_pid
+
+    def signal_managed_command(
+        self,
+        sandbox: Sandbox,
+        command_id: str,
+        process: subprocess.Popen[bytes],
+        signal_name: str,
+    ) -> None:
+        pid_file = (
+            Path(sandbox.workspace_path)
+            / ".agentenv"
+            / "commands"
+            / f"{command_id}.pid"
+        )
+        try:
+            runtime_pid = int(pid_file.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            if process.poll() is None:
+                os.killpg(process.pid, getattr(signal, f"SIG{signal_name}"))
+            return
+        self._run(
+            [
+                "exec",
+                self._runtime_id(sandbox),
+                "kill",
+                f"-{signal_name}",
+                str(runtime_pid),
+            ],
+            allow_failure=True,
+        )
+
+    def cleanup_managed_command(
+        self, sandbox: Sandbox, command_id: str
+    ) -> None:
+        pid_file = (
+            Path(sandbox.workspace_path)
+            / ".agentenv"
+            / "commands"
+            / f"{command_id}.pid"
+        )
+        try:
+            pid_file.unlink()
+        except FileNotFoundError:
+            pass
+
     def __init__(
         self,
         docker_binary: str = "docker",
         pull_missing: bool = True,
         runner: DockerRunner = subprocess.run,
+        popen_factory: PopenFactory = subprocess.Popen,
     ):
         self.docker_binary = docker_binary
         self.runner = runner
+        self.popen_factory = popen_factory
         self.resolver = DockerImageResolver(
             docker_binary=docker_binary,
             pull_missing=pull_missing,

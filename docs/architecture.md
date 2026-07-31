@@ -6,6 +6,10 @@ AgentENV Python 把参考项目最核心的生命周期拆为四层：
 flowchart LR
     CLI["CLI"] --> O["Orchestrator"]
     API["HTTP API"] --> O
+    API --> F["Filesystem Service"]
+    API --> C["Commands Service"]
+    F --> O
+    C --> O
     O --> S["JSON Metadata Store"]
     O --> B["SandboxBackend"]
     B --> L["LocalProcessBackend"]
@@ -23,6 +27,8 @@ flowchart LR
 - `OCI Image Resolver`：规范化 registry/repository/tag/digest 并检查镜像；
 - `JsonMetadataStore`：原子写入模板、沙箱、快照和事件元数据；
 - `MaintenanceWorker`：周期性检查 TTL，删除到期沙箱；
+- `FilesystemService`：提供工作区路径隔离和 Local/Docker 统一文件操作；
+- `CommandService`：管理后台进程、增量输出、stdin、信号和客户端重连；
 - CLI/API：仅负责输入输出，不直接操作工作目录。
 
 ## 生命周期
@@ -50,6 +56,7 @@ stateDiagram-v2
 
 ## 当前取舍
 
-本机后端的暂停和恢复是逻辑状态转换；Docker 后端映射为容器 pause/unpause。
-两个后端的快照都只复制工作目录，不捕获进程内存。Docker 的 allow/deny
-列表在编排层完整保存，但当前只有全量断网由后端强制执行。
+本机后端的沙箱暂停和恢复是逻辑状态转换，但由 `CommandService` 启动的活动
+进程组会真实收到 stop/continue；Docker 后端映射为容器 pause/unpause。两个
+后端的快照都只复制工作目录，不捕获进程内存。Docker 的 allow/deny 列表在
+编排层完整保存，但当前只有全量断网由后端强制执行。

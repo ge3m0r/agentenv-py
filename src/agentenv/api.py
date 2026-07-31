@@ -14,6 +14,11 @@ from .e2b import (
     resources_from_request,
     sandbox_to_e2b,
 )
+from .commands import (
+    CommandConflictError,
+    CommandNotFoundError,
+    CommandServiceError,
+)
 from .filesystem import (
     FilesystemConflictError,
     FilesystemError,
@@ -149,6 +154,67 @@ class AgentEnvApi:
                 sandbox_id, body["command"], body.get("timeout")
             )
             return 200, result.to_dict()
+        if action == "commands" and method == "GET":
+            return 200, [
+                item.to_dict()
+                for item in self.orchestrator.commands.list(sandbox_id)
+            ]
+        if action == "commands" and method == "POST":
+            item = self.orchestrator.commands.start(
+                sandbox_id, body["command"]
+            )
+            response: dict[str, Any] = {"command": item.to_dict()}
+            if not bool(body.get("background", True)):
+                item = self.orchestrator.commands.wait(
+                    sandbox_id, item.id, body.get("timeout")
+                )
+                response["command"] = item.to_dict()
+                response["output"] = self.orchestrator.commands.read_output(
+                    sandbox_id, item.id
+                )
+            return 201, response
+        if action == "commands/connect" and method == "POST":
+            item = self.orchestrator.commands.connect(
+                sandbox_id,
+                command_id=body.get("command_id", body.get("commandID")),
+                pid=body.get("pid"),
+            )
+            return 200, item.to_dict()
+        command_match = re.fullmatch(
+            r"commands/([^/]+)(?:/(output|stdin|signal|wait))?", action or ""
+        )
+        if command_match:
+            command_id, command_action = command_match.groups()
+            if method == "GET" and command_action is None:
+                return 200, self.orchestrator.commands.get(
+                    sandbox_id, command_id
+                ).to_dict()
+            if method == "POST" and command_action == "output":
+                return 200, self.orchestrator.commands.read_output(
+                    sandbox_id,
+                    command_id,
+                    stdout_offset=int(body.get("stdout_offset", 0)),
+                    stderr_offset=int(body.get("stderr_offset", 0)),
+                    wait_seconds=float(body.get("wait_seconds", 0)),
+                )
+            if method == "POST" and command_action == "stdin":
+                item = self.orchestrator.commands.send_stdin(
+                    sandbox_id,
+                    command_id,
+                    body["data"],
+                    encoding=body.get("encoding", "utf-8"),
+                )
+                return 200, item.to_dict()
+            if method == "POST" and command_action == "signal":
+                item = self.orchestrator.commands.signal(
+                    sandbox_id, command_id, body.get("signal", "TERM")
+                )
+                return 200, item.to_dict()
+            if method == "POST" and command_action == "wait":
+                item = self.orchestrator.commands.wait(
+                    sandbox_id, command_id, body.get("timeout")
+                )
+                return 200, item.to_dict()
         if method == "POST" and action == "files/read":
             return 200, self.filesystem.read(
                 sandbox_id,
@@ -287,11 +353,17 @@ def make_handler(api: AgentEnvApi) -> type[BaseHTTPRequestHandler]:
                 status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
             except FilesystemNotFoundError as error:
                 status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
+            except CommandNotFoundError as error:
+                status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
             except ConflictError as error:
                 status, result = HTTPStatus.CONFLICT, {"error": str(error)}
             except FilesystemConflictError as error:
                 status, result = HTTPStatus.CONFLICT, {"error": str(error)}
+            except CommandConflictError as error:
+                status, result = HTTPStatus.CONFLICT, {"error": str(error)}
             except FilesystemError as error:
+                status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}
+            except CommandServiceError as error:
                 status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}
             except (AgentEnvError, KeyError, ValueError) as error:
                 status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}

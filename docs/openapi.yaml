@@ -207,6 +207,154 @@ paths:
       responses:
         "200":
           description: Command result
+  /sandboxes/{sandboxId}/commands:
+    get:
+      summary: List running and completed managed commands
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      responses:
+        "200":
+          description: Managed command list
+    post:
+      summary: Start a foreground or background managed command
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [command]
+              properties:
+                command:
+                  type: string
+                background:
+                  type: boolean
+                  default: true
+                timeout:
+                  type: number
+                  minimum: 0
+      responses:
+        "201":
+          description: Managed command started
+  /sandboxes/{sandboxId}/commands/connect:
+    post:
+      summary: Reconnect to a managed command by command ID or PID
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                commandID:
+                  type: string
+                pid:
+                  type: integer
+      responses:
+        "200":
+          description: Managed command metadata
+  /sandboxes/{sandboxId}/commands/{commandId}:
+    get:
+      summary: Inspect a managed command
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+        - $ref: "#/components/parameters/CommandId"
+      responses:
+        "200":
+          description: Managed command metadata
+  /sandboxes/{sandboxId}/commands/{commandId}/output:
+    post:
+      summary: Incrementally read stdout and stderr using byte offsets
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+        - $ref: "#/components/parameters/CommandId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stdout_offset:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                stderr_offset:
+                  type: integer
+                  minimum: 0
+                  default: 0
+                wait_seconds:
+                  type: number
+                  minimum: 0
+                  maximum: 30
+                  default: 0
+      responses:
+        "200":
+          description: New output and next byte offsets
+  /sandboxes/{sandboxId}/commands/{commandId}/stdin:
+    post:
+      summary: Send UTF-8 or Base64 data to command stdin
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+        - $ref: "#/components/parameters/CommandId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: string
+                encoding:
+                  type: string
+                  enum: [utf-8, base64]
+                  default: utf-8
+      responses:
+        "200":
+          description: Managed command metadata
+  /sandboxes/{sandboxId}/commands/{commandId}/signal:
+    post:
+      summary: Send TERM, KILL or INT to a managed command
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+        - $ref: "#/components/parameters/CommandId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                signal:
+                  type: string
+                  enum: [TERM, KILL, INT]
+                  default: TERM
+      responses:
+        "200":
+          description: Managed command metadata
+  /sandboxes/{sandboxId}/commands/{commandId}/wait:
+    post:
+      summary: Wait for a command, killing it when the timeout expires
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+        - $ref: "#/components/parameters/CommandId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                timeout:
+                  type: number
+                  minimum: 0
+      responses:
+        "200":
+          description: Final managed command metadata
   /sandboxes/{sandboxId}/files/read:
     post:
       summary: Read a UTF-8 or Base64-encoded file from the sandbox workspace
@@ -510,6 +658,12 @@ components:
     SnapshotId:
       in: path
       name: snapshotId
+      required: true
+      schema:
+        type: string
+    CommandId:
+      in: path
+      name: commandId
       required: true
       schema:
         type: string

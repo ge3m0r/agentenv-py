@@ -207,6 +207,130 @@ paths:
       responses:
         "200":
           description: Command result
+  /sandboxes/{sandboxId}/files/read:
+    post:
+      summary: Read a UTF-8 or Base64-encoded file from the sandbox workspace
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FileReadRequest"
+      responses:
+        "200":
+          description: File content
+  /sandboxes/{sandboxId}/files/write:
+    post:
+      summary: Write a UTF-8 or Base64-encoded file into the sandbox workspace
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/FileReadRequest"
+                - type: object
+                  required: [data]
+                  properties:
+                    data:
+                      type: string
+      responses:
+        "200":
+          description: Written filesystem entry
+  /sandboxes/{sandboxId}/files/stat:
+    post:
+      summary: Inspect a sandbox filesystem entry
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FilePathRequest"
+      responses:
+        "200":
+          description: Filesystem entry
+  /sandboxes/{sandboxId}/files/list:
+    post:
+      summary: List a sandbox directory
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FilePathRequest"
+      responses:
+        "200":
+          description: Filesystem entries
+  /sandboxes/{sandboxId}/files/mkdir:
+    post:
+      summary: Create a sandbox directory
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/FilePathRequest"
+                - type: object
+                  properties:
+                    parents:
+                      type: boolean
+                      default: true
+                    exist_ok:
+                      type: boolean
+                      default: true
+      responses:
+        "201":
+          description: Created directory entry
+  /sandboxes/{sandboxId}/files/move:
+    post:
+      summary: Move or rename a sandbox filesystem entry
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, destination]
+              properties:
+                source:
+                  type: string
+                destination:
+                  type: string
+      responses:
+        "200":
+          description: Moved filesystem entry
+  /sandboxes/{sandboxId}/files/remove:
+    post:
+      summary: Remove a sandbox filesystem entry
+      parameters:
+        - $ref: "#/components/parameters/SandboxId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/FilePathRequest"
+                - type: object
+                  properties:
+                    recursive:
+                      type: boolean
+                      default: false
+      responses:
+        "204":
+          description: Filesystem entry removed
   /sandboxes/{sandboxId}/pause:
     post:
       summary: Pause a running sandbox
@@ -389,3 +513,20 @@ components:
       required: true
       schema:
         type: string
+  schemas:
+    FilePathRequest:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Path relative to the sandbox workspace virtual root.
+    FileReadRequest:
+      allOf:
+        - $ref: "#/components/schemas/FilePathRequest"
+        - type: object
+          properties:
+            encoding:
+              type: string
+              enum: [utf-8, base64]
+              default: utf-8

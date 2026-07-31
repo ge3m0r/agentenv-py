@@ -14,12 +14,19 @@ from .e2b import (
     resources_from_request,
     sandbox_to_e2b,
 )
+from .filesystem import (
+    FilesystemConflictError,
+    FilesystemError,
+    FilesystemNotFoundError,
+    FilesystemService,
+)
 from .orchestrator import AgentEnvError, ConflictError, NotFoundError, Orchestrator
 
 
 class AgentEnvApi:
     def __init__(self, orchestrator: Orchestrator):
         self.orchestrator = orchestrator
+        self.filesystem = FilesystemService(orchestrator)
 
     def dispatch(
         self, method: str, path: str, body: dict[str, Any]
@@ -142,6 +149,51 @@ class AgentEnvApi:
                 sandbox_id, body["command"], body.get("timeout")
             )
             return 200, result.to_dict()
+        if method == "POST" and action == "files/read":
+            return 200, self.filesystem.read(
+                sandbox_id,
+                body["path"],
+                body.get("encoding", "utf-8"),
+            )
+        if method == "POST" and action == "files/write":
+            entry = self.filesystem.write(
+                sandbox_id,
+                body["path"],
+                body["data"],
+                body.get("encoding", "utf-8"),
+            )
+            return 200, entry.to_dict()
+        if method == "POST" and action == "files/stat":
+            return 200, self.filesystem.stat(
+                sandbox_id, body["path"]
+            ).to_dict()
+        if method == "POST" and action == "files/list":
+            return 200, [
+                entry.to_dict()
+                for entry in self.filesystem.list(
+                    sandbox_id, body.get("path", "/")
+                )
+            ]
+        if method == "POST" and action == "files/mkdir":
+            entry = self.filesystem.make_dir(
+                sandbox_id,
+                body["path"],
+                parents=bool(body.get("parents", True)),
+                exist_ok=bool(body.get("exist_ok", True)),
+            )
+            return 201, entry.to_dict()
+        if method == "POST" and action == "files/move":
+            entry = self.filesystem.move(
+                sandbox_id, body["source"], body["destination"]
+            )
+            return 200, entry.to_dict()
+        if method == "POST" and action == "files/remove":
+            self.filesystem.remove(
+                sandbox_id,
+                body["path"],
+                recursive=bool(body.get("recursive", False)),
+            )
+            return 204, {}
         if method == "POST" and action == "pause":
             self.orchestrator.pause(sandbox_id)
             return 204, {}
@@ -233,8 +285,14 @@ def make_handler(api: AgentEnvApi) -> type[BaseHTTPRequestHandler]:
                 status, result = api.dispatch(self.command, self.path, body)
             except NotFoundError as error:
                 status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
+            except FilesystemNotFoundError as error:
+                status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
             except ConflictError as error:
                 status, result = HTTPStatus.CONFLICT, {"error": str(error)}
+            except FilesystemConflictError as error:
+                status, result = HTTPStatus.CONFLICT, {"error": str(error)}
+            except FilesystemError as error:
+                status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}
             except (AgentEnvError, KeyError, ValueError) as error:
                 status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}
             except Exception as error:

@@ -15,31 +15,7 @@
 
 ## 当前实施队列
 
-### 1. Filesystem 基础接口
-
-为 Local 和 Docker 沙箱提供统一的文件数据面，为后续 E2B
-controller/envd 兼容打基础。
-
-范围：
-
-- 读取、写入文件；
-- 查询文件或目录信息；
-- 列出目录；
-- 创建目录；
-- 移动或重命名文件；
-- 删除文件或目录；
-- 校验目标路径不能逃逸沙箱工作区；
-- 将文件能力放入独立服务边界，不直接耦合 HTTP 路由。
-
-验收标准：
-
-- Local 和 Docker 后端通过同一组 Filesystem 契约测试；
-- HTTP 层可以完整调用上述操作；
-- 二进制文件和 UTF-8 文本均可读写；
-- 非法路径、文件不存在和类型冲突返回稳定错误；
-- README 或 API 文档包含一条完整的写入、读取、删除示例。
-
-### 2. Commands 流式执行和后台进程
+### 1. Commands 流式执行和后台进程
 
 在现有同步 `exec` 之外增加进程生命周期管理。
 
@@ -60,7 +36,7 @@ controller/envd 兼容打基础。
 - 客户端断开后，后台命令可以继续运行并重新连接；
 - pause、resume 和 delete 对后台进程的行为有明确测试。
 
-### 3. PTY WebSocket
+### 2. PTY WebSocket
 
 提供可交互终端数据面。
 
@@ -78,7 +54,7 @@ controller/envd 兼容打基础。
 - 支持 ANSI 输出、窗口 resize 和重新连接；
 - 删除 Sandbox 时不会残留 PTY 进程。
 
-### 4. Sandbox 安全访问
+### 3. Sandbox 安全访问
 
 补齐 E2B secure sandbox 的核心认证语义。
 
@@ -98,7 +74,7 @@ controller/envd 兼容打基础。
 - API 响应不再固定返回空的 `envdAccessToken`；
 - 日志和错误响应不会泄露 token。
 
-### 5. 端口流量代理
+### 4. 端口流量代理
 
 让 Sandbox 内启动的 HTTP/WebSocket 服务能够从外部访问。
 
@@ -119,7 +95,7 @@ controller/envd 兼容打基础。
 - 私有流量必须携带有效 token；
 - Sandbox pause、resume、delete 后路由状态正确。
 
-### 6. 官方 E2B SDK 端到端兼容测试
+### 5. 官方 E2B SDK 端到端兼容测试
 
 使用真实 Python E2B SDK 验证控制面和数据面，而不再只依赖 Fake SDK。
 
@@ -137,7 +113,7 @@ controller/envd 兼容打基础。
 - CI 能检测 SDK 升级造成的接口不兼容；
 - 文档明确列出已兼容和暂未兼容的 SDK 能力。
 
-### 7. Template Builder
+### 6. Template Builder
 
 增加可构建、可版本化的模板流程。
 
@@ -156,7 +132,7 @@ controller/envd 兼容打基础。
 - 可以构建并快照一个已启动 HTTP 服务的模板；
 - 从模板创建 Sandbox 后能够立即执行主流程。
 
-### 8. MCP 与持久卷
+### 7. MCP 与持久卷
 
 补充面向 Agent 工作负载的组合能力。
 
@@ -175,7 +151,7 @@ controller/envd 兼容打基础。
 - 两个 Sandbox 可以按权限共享一个持久卷；
 - 删除 Sandbox 不会误删仍被引用的 Volume。
 
-### 9. 平台级可靠性
+### 8. 平台级可靠性
 
 在核心兼容流程稳定后补充生产化能力。
 
@@ -194,4 +170,3 @@ controller/envd 兼容打基础。
 - 多进程或多节点并发操作不会破坏元数据；
 - 关键生命周期操作可观测、可审计、可恢复；
 - 安全策略由运行时强制执行，而不是只保存为元数据。
-

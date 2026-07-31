@@ -65,12 +65,26 @@ class Orchestrator:
         self._lock = RLock()
         self.recover_interrupted_operations()
 
-    def _ensure_backend(self, sandbox: Sandbox) -> None:
+    def ensure_backend(self, sandbox: Sandbox) -> None:
         if sandbox.backend != self.backend.name:
             raise ConflictError(
                 f"sandbox uses backend {sandbox.backend}, "
                 f"but this process uses {self.backend.name}"
             )
+
+    def prepare_activity(self, sandbox: Sandbox, activity: str) -> Sandbox:
+        if sandbox.state == SandboxState.PAUSED and sandbox.auto_resume:
+            sandbox = self.resume(sandbox.id)
+            if sandbox.timeout_seconds:
+                sandbox = self.update_timeout(
+                    sandbox.id, sandbox.timeout_seconds
+                )
+        if sandbox.state != SandboxState.RUNNING:
+            raise AgentEnvError(
+                f"sandbox {sandbox.id} is {sandbox.state.value}; "
+                f"{activity} requires running"
+            )
+        return sandbox
 
     def _event(
         self,
@@ -334,17 +348,8 @@ class Orchestrator:
         self, sandbox_id: str, command: str, timeout: float | None = None
     ) -> CommandResult:
         sandbox = self.get_sandbox(sandbox_id)
-        self._ensure_backend(sandbox)
-        if sandbox.state == SandboxState.PAUSED and sandbox.auto_resume:
-            sandbox = self.resume(sandbox.id)
-            if sandbox.timeout_seconds:
-                sandbox = self.update_timeout(
-                    sandbox.id, sandbox.timeout_seconds
-                )
-        if sandbox.state != SandboxState.RUNNING:
-            raise AgentEnvError(
-                f"sandbox {sandbox_id} is {sandbox.state.value}; execution requires running"
-            )
+        self.ensure_backend(sandbox)
+        sandbox = self.prepare_activity(sandbox, "execution")
         result = self.backend.execute(sandbox, command, timeout)
         self._event(
             "command_executed",
@@ -359,7 +364,7 @@ class Orchestrator:
     def pause(self, sandbox_id: str) -> Sandbox:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
-            self._ensure_backend(sandbox)
+            self.ensure_backend(sandbox)
             if sandbox.state == SandboxState.PAUSED:
                 return sandbox
             if sandbox.state != SandboxState.RUNNING:
@@ -374,7 +379,7 @@ class Orchestrator:
     def resume(self, sandbox_id: str) -> Sandbox:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
-            self._ensure_backend(sandbox)
+            self.ensure_backend(sandbox)
             if sandbox.state == SandboxState.RUNNING:
                 return sandbox
             if sandbox.state != SandboxState.PAUSED:
@@ -389,7 +394,7 @@ class Orchestrator:
     def snapshot(self, sandbox_id: str) -> Snapshot:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
-            self._ensure_backend(sandbox)
+            self.ensure_backend(sandbox)
             if sandbox.state != SandboxState.RUNNING:
                 raise AgentEnvError("only a running sandbox can be snapshotted")
             snapshot_id = _id("snp")
@@ -461,7 +466,7 @@ class Orchestrator:
             raise AgentEnvError("count must be at least 1")
         with self._lock:
             source = self.get_sandbox(sandbox_id)
-            self._ensure_backend(source)
+            self.ensure_backend(source)
             if source.state != SandboxState.RUNNING:
                 raise AgentEnvError("only a running sandbox can be forked")
             children: list[Sandbox] = []
@@ -507,7 +512,7 @@ class Orchestrator:
     def delete(self, sandbox_id: str) -> None:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
-            self._ensure_backend(sandbox)
+            self.ensure_backend(sandbox)
             previous = sandbox.state
             sandbox.state = SandboxState.KILLING
             sandbox.updated_at = _now()
@@ -557,7 +562,7 @@ class Orchestrator:
     ) -> Sandbox:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
-            self._ensure_backend(sandbox)
+            self.ensure_backend(sandbox)
             if sandbox.state != SandboxState.RUNNING:
                 raise ConflictError("network can only be updated while running")
             resolved = (
@@ -583,7 +588,7 @@ class Orchestrator:
     ) -> Sandbox:
         with self._lock:
             sandbox = self.get_sandbox(sandbox_id)
-            self._ensure_backend(sandbox)
+            self.ensure_backend(sandbox)
             if sandbox.state != SandboxState.RUNNING:
                 raise ConflictError("resources can only be updated while running")
             resolved = (

@@ -10,11 +10,11 @@
 - CPU、内存、PID 和网络策略；
 - E2B 风格的 camelCase 请求与响应字段；
 - 生命周期事件；
-- AgentENV 扩展的同步命令执行接口。
+- AgentENV 扩展的同步命令执行和 Local/Docker Filesystem 接口。
 
 当前尚未实现 Sandbox Controller/envd，因此官方 E2B SDK 的 `files`、PTY、
-流式 commands 和端口代理还不能零修改接入。命令执行暂时使用
-`POST /sandboxes/{sandboxID}/exec`。
+流式 commands 和端口代理还不能零修改接入。命令和文件操作暂时使用
+`POST /sandboxes/{sandboxID}/exec` 与 `/files/*` 扩展接口。
 
 > 当前服务没有 API Key 认证，只应监听本机或可信网络。
 
@@ -224,7 +224,84 @@ curl -X POST \
 
 命令超时使用退出码 `124`。
 
-## 6. 查询 Sandbox
+## 6. Filesystem 文件操作
+
+Filesystem 接口以 Sandbox 工作区作为虚拟根目录。绝对路径 `/data/a.txt` 和
+相对路径 `data/a.txt` 都会定位到工作区内部；包含 `..` 或通过符号链接逃逸
+工作区的路径会被拒绝。
+
+创建目录并写入 UTF-8 文本：
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/mkdir \
+  -H 'content-type: application/json' \
+  -d '{"path":"/data/incoming"}'
+
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/write \
+  -H 'content-type: application/json' \
+  -d '{
+    "path": "/data/incoming/message.txt",
+    "data": "hello from filesystem",
+    "encoding": "utf-8"
+  }'
+```
+
+读取和列出目录：
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/read \
+  -H 'content-type: application/json' \
+  -d '{"path":"/data/incoming/message.txt","encoding":"utf-8"}'
+
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/list \
+  -H 'content-type: application/json' \
+  -d '{"path":"/data/incoming"}'
+```
+
+二进制数据使用 Base64：
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/write \
+  -H 'content-type: application/json' \
+  -d '{
+    "path": "/data/payload.bin",
+    "data": "AP9hZ2VudGVudg==",
+    "encoding": "base64"
+  }'
+```
+
+查询、移动和删除：
+
+```bash
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/stat \
+  -H 'content-type: application/json' \
+  -d '{"path":"/data/incoming/message.txt"}'
+
+curl -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/move \
+  -H 'content-type: application/json' \
+  -d '{
+    "source": "/data/incoming/message.txt",
+    "destination": "/data/message.txt"
+  }'
+
+curl -i -X POST \
+  http://127.0.0.1:8000/sandboxes/<sandboxID>/files/remove \
+  -H 'content-type: application/json' \
+  -d '{"path":"/data","recursive":true}'
+```
+
+Local 和 Docker 后端使用同一 Filesystem 契约；Docker 的工作区对应容器内
+`/workspace`。当前这些是 AgentENV HTTP 扩展接口，尚不是 E2B envd 的
+ConnectRPC Filesystem 协议。
+
+## 7. 查询 Sandbox
 
 查询一个 Sandbox：
 
@@ -252,7 +329,7 @@ curl --get http://127.0.0.1:8000/v2/sandboxes \
   --data-urlencode 'metadata=user=demo-user&task=e2b-api-guide'
 ```
 
-## 7. 暂停与恢复
+## 8. 暂停与恢复
 
 暂停：
 
@@ -284,7 +361,7 @@ curl -X POST \
   -d '{"timeout":600}'
 ```
 
-## 8. 更新 TTL
+## 9. 更新 TTL
 
 ```bash
 curl -i -X POST \
@@ -304,7 +381,7 @@ curl -X POST \
   -d '{"timeout":0}'
 ```
 
-## 9. 更新资源限制
+## 10. 更新资源限制
 
 Docker 后端会通过 `docker update` 更新 CPU、内存和 PID 限制：
 
@@ -323,7 +400,7 @@ curl -X PUT \
 `diskSizeMB` 会保存为调度元数据。Docker bind mount 没有统一的跨平台目录
 配额能力，所以当前不会实时限制工作区大小。
 
-## 10. 更新网络策略
+## 11. 更新网络策略
 
 完全断网：
 
@@ -359,7 +436,7 @@ curl -X PUT \
 当前 Docker 后端只强制执行完全断网/恢复联网。细粒度 allow/deny 规则会被
 验证和持久化，但还没有接入 iptables/eBPF 执行器。
 
-## 11. Snapshot 与 Fork
+## 12. Snapshot 与 Fork
 
 创建 Snapshot：
 
@@ -387,7 +464,7 @@ curl -X POST \
 
 当前 Docker Snapshot 复制 `/workspace`，不包含完整容器 rootfs 和内存。
 
-## 12. 生命周期事件
+## 13. 生命周期事件
 
 查询 Sandbox 最近事件：
 
@@ -414,7 +491,7 @@ curl --get \
   --data 'types=command_executed'
 ```
 
-## 13. 删除 Sandbox
+## 14. 删除 Sandbox
 
 ```bash
 curl -i -X DELETE \
@@ -423,7 +500,7 @@ curl -i -X DELETE \
 
 成功返回 `204 No Content`。Docker 后端会删除容器和对应工作目录。
 
-## 14. Python 完整示例
+## 15. Python 完整示例
 
 仓库提供了一个只使用 Python 标准库的完整示例：
 
@@ -452,7 +529,7 @@ python3.10 examples/e2b_api_client.py \
 6. 查询生命周期事件；
 7. 删除 Sandbox。
 
-## 15. 常见错误
+## 16. 常见错误
 
 | HTTP 状态 | 含义 |
 |---|---|

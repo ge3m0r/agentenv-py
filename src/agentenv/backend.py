@@ -18,6 +18,7 @@ from .models import (
     Template,
 )
 from .oci import DockerImageResolver
+from .filesystem import FilesystemUnavailableError, WorkspaceFilesystem
 
 
 class SandboxBackend(ABC):
@@ -27,6 +28,11 @@ class SandboxBackend(ABC):
 
     def prepare_template(self, template: Template) -> Template:
         return template
+
+    def filesystem(self, sandbox: Sandbox) -> WorkspaceFilesystem:
+        raise FilesystemUnavailableError(
+            f"backend {self.name} does not provide a filesystem data plane"
+        )
 
     @abstractmethod
     def create(self, template: Template, sandbox: Sandbox) -> None: ...
@@ -81,6 +87,9 @@ class LocalProcessBackend(SandboxBackend):
     """
 
     name = "local"
+
+    def filesystem(self, sandbox: Sandbox) -> WorkspaceFilesystem:
+        return WorkspaceFilesystem(sandbox.workspace_path)
 
     def create(self, template: Template, sandbox: Sandbox) -> None:
         source = Path(template.rootfs_path)
@@ -187,6 +196,11 @@ class DockerSandboxBackend(SandboxBackend):
     """
 
     name = "docker"
+
+    def filesystem(self, sandbox: Sandbox) -> WorkspaceFilesystem:
+        # /workspace is a bind mount of workspace_path, so host-side file
+        # operations and commands running in the container see the same data.
+        return WorkspaceFilesystem(sandbox.workspace_path)
 
     def __init__(
         self,

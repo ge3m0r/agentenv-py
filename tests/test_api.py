@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import tempfile
 import time
 import unittest
@@ -116,6 +117,74 @@ class ApiTest(unittest.TestCase):
         )
         self.assertEqual(200, status)
         self.assertEqual(1, len(paused))
+
+    def test_filesystem_flow(self) -> None:
+        _, template = self.api.dispatch(
+            "POST", "/templates", {"name": "filesystem-api"}
+        )
+        _, sandbox = self.api.dispatch(
+            "POST", "/sandboxes", {"template_id": template["id"]}
+        )
+        base = f"/sandboxes/{sandbox['id']}/files"
+
+        status, directory = self.api.dispatch(
+            "POST", f"{base}/mkdir", {"path": "/data/incoming"}
+        )
+        self.assertEqual(201, status)
+        self.assertEqual("directory", directory["type"])
+
+        binary = b"\x00\xffapi"
+        encoded = base64.b64encode(binary).decode("ascii")
+        status, written = self.api.dispatch(
+            "POST",
+            f"{base}/write",
+            {
+                "path": "/data/incoming/payload.bin",
+                "data": encoded,
+                "encoding": "base64",
+            },
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(len(binary), written["size"])
+
+        status, read = self.api.dispatch(
+            "POST",
+            f"{base}/read",
+            {"path": "/data/incoming/payload.bin", "encoding": "base64"},
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(encoded, read["data"])
+
+        status, entries = self.api.dispatch(
+            "POST", f"{base}/list", {"path": "/data/incoming"}
+        )
+        self.assertEqual(200, status)
+        self.assertEqual(["payload.bin"], [entry["name"] for entry in entries])
+
+        status, moved = self.api.dispatch(
+            "POST",
+            f"{base}/move",
+            {
+                "source": "/data/incoming/payload.bin",
+                "destination": "/data/payload.bin",
+            },
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("/data/payload.bin", moved["path"])
+
+        status, metadata = self.api.dispatch(
+            "POST", f"{base}/stat", {"path": "/data/payload.bin"}
+        )
+        self.assertEqual(200, status)
+        self.assertEqual("file", metadata["type"])
+
+        status, removed = self.api.dispatch(
+            "POST",
+            f"{base}/remove",
+            {"path": "/data", "recursive": True},
+        )
+        self.assertEqual(204, status)
+        self.assertEqual({}, removed)
 
     def test_unknown_route(self) -> None:
         status, body = self.api.dispatch("GET", "/missing", {})

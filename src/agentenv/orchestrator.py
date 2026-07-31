@@ -443,6 +443,8 @@ class Orchestrator:
                 raise ConflictError(
                     f"snapshot is used by {len(in_use)} sandbox(es): {', '.join(in_use)}"
                 )
+            if snapshot.backend == self.backend.name:
+                self.backend.delete_snapshot(snapshot)
             root = Path(snapshot.rootfs_path).parent
             if root.exists():
                 shutil.rmtree(root)

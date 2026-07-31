@@ -25,3 +25,6 @@ aenv-py = "agentenv.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[project.optional-dependencies]
+e2b = ["e2b>=2.35"]

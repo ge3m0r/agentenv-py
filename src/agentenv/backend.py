@@ -48,6 +48,15 @@ class SandboxBackend(ABC):
     @abstractmethod
     def restore(self, snapshot: Snapshot, sandbox: Sandbox) -> None: ...
 
+    def delete_snapshot(self, snapshot: Snapshot) -> None:
+        """Release any backend-side snapshot resources.
+
+        Default is a no-op (local/docker snapshots live entirely on disk and
+        are removed by the orchestrator). Cloud backends override this to
+        delete the remote snapshot.
+        """
+        return None
+
     @abstractmethod
     def update_network(self, sandbox: Sandbox, policy: NetworkPolicy) -> None: ...
 

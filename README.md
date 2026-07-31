@@ -17,7 +17,7 @@ OCI/Template → Sandbox → Exec → Pause/Resume
 
 ## 已实现
 
-- Local 与 Docker 两种运行时后端；
+- Local、Docker 与 E2B 三种运行时后端；
 - Docker Hub、私有 Registry、tag 和 digest 形式的 OCI 引用解析；
 - OCI 镜像检查，缺失时可自动 `docker pull`；
 - CPU、内存、PID 限制以及磁盘配额元数据；
@@ -155,6 +155,62 @@ timeout、fork 和 cold start，以及 `sandboxID/templateID/startedAt/endAt`
 controller/envd 的独立 ConnectRPC/WebSocket 接口；本项目目前只提供
 `POST /sandboxes/{id}/exec` 扩展，因此尚不能宣称完整 SDK 零改动兼容。
 
+## E2B 后端（托管沙箱）
+
+除了本机和 Docker，还可以把沙箱跑在 [E2B](https://e2b.dev) 的托管运行时上。
+E2B 后端是一个可选依赖：
+
+```bash
+pip install -e ".[e2b]"
+```
+
+在 `.env` 里配置 API Key（与官方 SDK 一致）：
+
+```text
+E2B_API_KEY=...
+```
+
+然后用 `--backend e2b` 启动，命令与其它后端完全一致：
+
+```bash
+PYTHONPATH=src python3.10 -m agentenv --backend e2b \
+  --data-dir /tmp/agentenv-e2b template-create base --source base
+
+PYTHONPATH=src python3.10 -m agentenv --backend e2b --data-dir /tmp/agentenv-e2b \
+  start base --timeout 300 --env MESSAGE=hello --on-timeout pause --auto-resume
+
+PYTHONPATH=src python3.10 -m agentenv --backend e2b --data-dir /tmp/agentenv-e2b \
+  exec <sandbox-id> 'echo "$MESSAGE" > result.txt && cat result.txt'
+
+PYTHONPATH=src python3.10 -m agentenv --backend e2b --data-dir /tmp/agentenv-e2b \
+  pause <sandbox-id>
+PYTHONPATH=src python3.10 -m agentenv --backend e2b --data-dir /tmp/agentenv-e2b \
+  resume <sandbox-id>
+PYTHONPATH=src python3.10 -m agentenv --backend e2b --data-dir /tmp/agentenv-e2b \
+  snapshot <sandbox-id>
+```
+
+E2B 后端的映射关系：
+
+| 本项目操作 | E2B SDK 调用 |
+|---|---|
+| 创建沙箱 | `Sandbox.create(template, timeout, envs, metadata, allow_internet_access, network, lifecycle)` |
+| 执行命令 | `Sandbox.connect(sandbox_id)` → `commands.run(cmd, envs, cwd, timeout)` |
+| 暂停 / 恢复 | `Sandbox.pause(sandbox_id)` / `Sandbox.connect(sandbox_id)` |
+| 快照 / 恢复 | `Sandbox.create_snapshot(sandbox_id)` → `Sandbox.create(template=snapshot_id)` |
+| 删除沙箱 | `Sandbox.kill(sandbox_id)` |
+| 更新网络 | `Sandbox.update_network(sandbox_id, network)` |
+| 存活检测 | `Sandbox.get_info(sandbox_id)` |
+
+E2B 的 `sandbox_id` 存在 `Sandbox.runtime_id` 里，所以句柄可以跨操作和进程
+重启重建。资源限制（CPU/内存）由模板固定，运行时不可变，`update_resources`
+是空操作但仍会持久化为元数据。E2B 快照是云端的，其 ID 记录在快照目录下的
+`e2b_snapshot.json` 中，删除快照时会同步删除云端快照。冷启动（OCI 镜像）
+是 Docker 专属概念，E2B 用模板启动。
+
+端到端示例（真实调用 E2B API）见
+[`examples/e2b_backend_demo.py`](examples/e2b_backend_demo.py)。
+
 相关官方说明：
 
 - [E2B sandbox lifecycle](https://e2b.dev/docs/sandbox)
@@ -173,7 +229,8 @@ Python 客户端的完整调用示例，见
 src/agentenv/
 ├── models.py        # 模板、资源、网络、沙箱、快照和事件
 ├── oci.py           # OCI 引用解析与 Docker 镜像解析
-├── backend.py       # LocalProcessBackend / DockerSandboxBackend
+├── backend.py       # LocalProcessBackend / DockerSandboxBackend（抽象 + 两种实现）
+├── e2b_backend.py   # E2BSandboxBackend（可选依赖 e2b）
 ├── orchestrator.py  # 状态机、回滚、恢复、TTL 和策略更新
 ├── e2b.py           # E2B 请求/响应适配
 ├── store.py         # JSON 元数据原子持久化

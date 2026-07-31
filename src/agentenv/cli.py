@@ -29,7 +29,7 @@ def _parser():
     )
     parser.add_argument(
         "--backend",
-        choices=("local", "docker"),
+        choices=("local", "docker", "e2b"),
         default=os.environ.get("AENV_BACKEND", "local"),
         help="sandbox runtime backend",
     )
@@ -211,11 +211,14 @@ def main(argv=None):
         )
         return 2
     args = _parser().parse_args(argv)
-    backend = (
-        DockerSandboxBackend(pull_missing=not args.no_pull)
-        if args.backend == "docker"
-        else LocalProcessBackend()
-    )
+    if args.backend == "docker":
+        backend = DockerSandboxBackend(pull_missing=not args.no_pull)
+    elif args.backend == "e2b":
+        from .e2b_backend import E2BSandboxBackend
+
+        backend = E2BSandboxBackend()
+    else:
+        backend = LocalProcessBackend()
     orchestrator = Orchestrator(Path(args.data_dir), backend=backend)
     try:
         if args.command == "serve":

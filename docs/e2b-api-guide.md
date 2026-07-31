@@ -43,6 +43,22 @@ PYTHONPATH=src python3.10 -m agentenv \
   serve
 ```
 
+### E2B 后端（托管沙箱）
+
+把沙箱跑在 E2B 云上需要可选依赖和 API Key：
+
+```bash
+pip install -e ".[e2b]"     # 安装 e2b SDK
+echo 'E2B_API_KEY=...' > .env
+PYTHONPATH=src python3.10 -m agentenv \
+  --backend e2b \
+  --data-dir /tmp/agentenv-e2b-api \
+  serve
+```
+
+E2B 后端的模板用 E2B 模板名（默认 `base`），不是 OCI 镜像。资源限制由模板
+固定、运行时不可变；冷启动（OCI 镜像）不可用。详见 README 的「E2B 后端」一节。
+
 默认地址：
 
 ```text

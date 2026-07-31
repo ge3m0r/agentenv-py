@@ -223,6 +223,11 @@ E2B 的 `sandbox_id` 存在 `Sandbox.runtime_id` 里，所以句柄可以跨操�
 Python 客户端的完整调用示例，见
 [E2B 兼容 API 调用指南](docs/e2b-api-guide.md)。
 
+后续 E2B controller/envd、Filesystem、Commands、PTY、安全访问、流量代理和
+模板构建的实施顺序见
+[E2B 兼容层推进路线](docs/e2b-roadmap.md)。该文档按工作队列维护：当前
+第一项完成并通过验收后会直接删除，由下一项成为新的当前阶段。
+
 ## 项目结构
 
 ```text

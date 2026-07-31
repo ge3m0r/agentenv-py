@@ -15,25 +15,7 @@
 
 ## 当前实施队列
 
-### 1. PTY WebSocket
-
-提供可交互终端数据面。
-
-范围：
-
-- 创建 PTY；
-- 双向输入和实时输出；
-- 调整终端行列尺寸；
-- disconnect、reconnect、wait 和 kill；
-- PTY 会话与 Sandbox 生命周期关联。
-
-验收标准：
-
-- 能通过浏览器或示例客户端打开交互式 shell；
-- 支持 ANSI 输出、窗口 resize 和重新连接；
-- 删除 Sandbox 时不会残留 PTY 进程。
-
-### 2. Sandbox 安全访问
+### 1. Sandbox 安全访问
 
 补齐 E2B secure sandbox 的核心认证语义。
 
@@ -53,7 +35,7 @@
 - API 响应不再固定返回空的 `envdAccessToken`；
 - 日志和错误响应不会泄露 token。
 
-### 3. 端口流量代理
+### 2. 端口流量代理
 
 让 Sandbox 内启动的 HTTP/WebSocket 服务能够从外部访问。
 
@@ -74,7 +56,7 @@
 - 私有流量必须携带有效 token；
 - Sandbox pause、resume、delete 后路由状态正确。
 
-### 4. 官方 E2B SDK 端到端兼容测试
+### 3. 官方 E2B SDK 端到端兼容测试
 
 使用真实 Python E2B SDK 验证控制面和数据面，而不再只依赖 Fake SDK。
 
@@ -92,7 +74,7 @@
 - CI 能检测 SDK 升级造成的接口不兼容；
 - 文档明确列出已兼容和暂未兼容的 SDK 能力。
 
-### 5. Template Builder
+### 4. Template Builder
 
 增加可构建、可版本化的模板流程。
 
@@ -111,7 +93,7 @@
 - 可以构建并快照一个已启动 HTTP 服务的模板；
 - 从模板创建 Sandbox 后能够立即执行主流程。
 
-### 6. MCP 与持久卷
+### 5. MCP 与持久卷
 
 补充面向 Agent 工作负载的组合能力。
 
@@ -130,7 +112,7 @@
 - 两个 Sandbox 可以按权限共享一个持久卷；
 - 删除 Sandbox 不会误删仍被引用的 Volume。
 
-### 7. 平台级可靠性
+### 6. 平台级可靠性
 
 在核心兼容流程稳定后补充生产化能力。
 

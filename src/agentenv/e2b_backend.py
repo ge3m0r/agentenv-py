@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,12 +47,14 @@ try:  # pragma: no cover - exercised only when e2b is installed
     from e2b import Sandbox as _E2BSandbox
     from e2b import SandboxNotFoundException as _E2BNotFound
     from e2b import TimeoutException as _E2BTimeout
+    from e2b.sandbox.commands.command_handle import PtySize as _E2BPtySize
 
     _E2B_AVAILABLE = True
 except ImportError:  # pragma: no cover
     _E2BSandbox = None  # type: ignore[assignment]
     _E2BNotFound = ()  # type: ignore[assignment]
     _E2BTimeout = ()  # type: ignore[assignment]
+    _E2BPtySize = None  # type: ignore[assignment]
     _E2B_AVAILABLE = False
 
 # Exceptions to treat as "sandbox not found" / "command timed out". Empty
@@ -61,6 +64,18 @@ _TIMEOUT_EXCS: tuple = (_E2BTimeout,) if _E2B_AVAILABLE else ()
 
 _SNAPSHOT_META = "e2b_snapshot.json"
 _SCRATCH_SOURCES = ("", "scratch", None)
+
+
+class E2BPtyHandle:
+    """Opaque handle for an E2B PTY: connected sandbox + pid (and the
+    streaming CommandHandle kept for cleanup)."""
+
+    __slots__ = ("sandbox", "pid", "handle")
+
+    def __init__(self, sandbox: Any, pid: int, handle: Any) -> None:
+        self.sandbox = sandbox
+        self.pid = pid
+        self.handle = handle
 
 
 class E2BBackendError(RuntimeError):
@@ -296,6 +311,61 @@ class E2BSandboxBackend(SandboxBackend):
         self._sandbox_cls.kill(
             sandbox_id=self._runtime_id(sandbox), **self._opts()
         )
+
+    # -- PTY data plane --------------------------------------------------
+
+    def start_pty(
+        self,
+        sandbox: Sandbox,
+        pty_id: str,
+        *,
+        rows: int,
+        cols: int,
+        command: str | None,
+        cwd: str | None,
+        envs: dict[str, str] | None,
+        on_output: Callable[[bytes], None],
+        on_exit: Callable[[int], None],
+    ) -> tuple[E2BPtyHandle, int]:
+        sbx = self._sandbox_cls.connect(
+            sandbox_id=self._runtime_id(sandbox), **self._opts()
+        )
+        size = _E2BPtySize(rows=rows, cols=cols)
+        handle = sbx.pty.create(
+            size,
+            cwd=cwd,
+            envs=envs,
+            timeout=0,  # keep the PTY stream open indefinitely
+        )
+        pid = handle.pid
+
+        def reader() -> None:
+            try:
+                result = handle.wait(on_pty=on_output)
+                on_exit(result.exit_code)
+            except Exception as error:  # pragma: no cover - network failure
+                on_exit(getattr(error, "exit_code", -1))
+
+        threading.Thread(
+            target=reader, name=f"{pty_id}-reader", daemon=True
+        ).start()
+        return E2BPtyHandle(sandbox=sbx, pid=pid, handle=handle), pid
+
+    def send_pty_input(
+        self, sandbox: Sandbox, handle: E2BPtyHandle, data: bytes
+    ) -> None:
+        handle.sandbox.pty.send_stdin(handle.pid, data)
+
+    def resize_pty(
+        self, sandbox: Sandbox, handle: E2BPtyHandle, rows: int, cols: int
+    ) -> None:
+        handle.sandbox.pty.resize(handle.pid, _E2BPtySize(rows=rows, cols=cols))
+
+    def kill_pty(self, sandbox: Sandbox, handle: E2BPtyHandle) -> None:
+        try:
+            handle.sandbox.pty.kill(handle.pid)
+        except _NOT_FOUND_EXCS:  # type: ignore[misc]
+            return
 
     def delete_snapshot(self, snapshot: Snapshot) -> None:
         """Delete the cloud-side E2B snapshot (best-effort)."""

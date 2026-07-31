@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AgentENV — PTY Terminal</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" />
+<style>
+  body { font-family: system-ui, sans-serif; background: #1e1e1e; color: #ddd; margin: 0; }
+  .bar { display: flex; gap: 8px; align-items: center; padding: 8px; background: #2d2d2d; flex-wrap: wrap; }
+  .bar label { font-size: 13px; }
+  .bar input { background: #1e1e1e; color: #ddd; border: 1px solid #444; border-radius: 3px; padding: 4px 6px; font-size: 13px; }
+  .bar button { background: #0b6bcb; color: #fff; border: 0; border-radius: 3px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  .bar button:disabled { background: #555; cursor: default; }
+  .bar button.danger { background: #b3261e; }
+  #status { font-size: 12px; margin-left: auto; opacity: .8; }
+  #term { padding: 8px; }
+  .hint { padding: 0 8px 8px; font-size: 12px; opacity: .7; }
+</style>
+</head>
+<body>
+<div class="bar">
+  <label>Base URL</label>
+  <input id="baseUrl" value="http://127.0.0.1:8000" size="26" />
+  <label>Sandbox ID</label>
+  <input id="sandboxId" size="30" placeholder="sbx_..." />
+  <button id="connect">Open terminal</button>
+  <button id="kill" class="danger" disabled>Kill</button>
+  <span id="status">disconnected</span>
+</div>
+<div class="hint">
+  Creates a PTY via <code>POST /sandboxes/{id}/pty</code>, then upgrades
+  <code>GET /sandboxes/{id}/pty/{ptyID}</code> to a WebSocket. Binary frames
+  carry raw input/output; text frames carry resize/kill/exit control.
+</div>
+<div id="term"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const term = new Terminal({ rows: 24, cols: 80, cursorBlink: true });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open($("term"));
+  try { fit.fit(); } catch (e) {}
+
+  let ws = null;
+  let ptyId = null;
+  const encoder = new TextEncoder();
+
+  function setStatus(msg, ok) {
+    const s = $("status");
+    s.textContent = msg;
+    s.style.color = ok === true ? "#7ee787" : ok === false ? "#ff7b72" : "#ddd";
+  }
+
+  function wsUrl(baseUrl, sandboxId, ptyId) {
+    const u = new URL(baseUrl);
+    const proto = u.protocol === "https:" ? "wss:" : "ws:";
+    return `${proto}//${u.host}/sandboxes/${sandboxId}/pty/${ptyId}?offset=0`;
+  }
+
+  async function connect() {
+    if (ws) { ws.close(); ws = null; }
+    const baseUrl = $("baseUrl").value.replace(/\/+$/, "");
+    const sandboxId = $("sandboxId").value.trim();
+    if (!sandboxId) { setStatus("enter a sandbox id", false); return; }
+    $("connect").disabled = true;
+    setStatus("creating pty…");
+    try {
+      const res = await fetch(`${baseUrl}/sandboxes/${sandboxId}/pty`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ rows: term.rows, cols: term.cols }),
+      });
+      if (!res.ok) throw new Error(`create pty: ${res.status} ${await res.text()}`);
+      const data = await res.json();
+      ptyId = data.ptyID || data.id;
+      term.reset();
+      openSocket(baseUrl, sandboxId, ptyId);
+    } catch (e) {
+      setStatus(String(e), false);
+      $("connect").disabled = false;
+    }
+  }
+
+  function openSocket(baseUrl, sandboxId, ptyId) {
+    ws = new WebSocket(wsUrl(baseUrl, sandboxId, ptyId));
+    ws.binaryType = "arraybuffer";
+    setStatus("connecting…");
+    ws.onopen = () => {
+      setStatus("connected", true);
+      $("kill").disabled = false;
+      term.focus();
+    };
+    ws.onmessage = (ev) => {
+      if (ev.data instanceof ArrayBuffer) {
+        term.write(new Uint8Array(ev.data));
+      } else {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === "exit") {
+            term.write(`\r\n[process exited with code ${msg.exitCode}]\r\n`);
+            setStatus(`exited (code ${msg.exitCode})`, true);
+            $("kill").disabled = true;
+          }
+        } catch (_) { /* ignore non-JSON text */ }
+      }
+    };
+    ws.onclose = () => {
+      if (ws === null) return; // intentional close
+      setStatus("disconnected", false);
+      $("connect").disabled = false;
+      $("kill").disabled = true;
+    };
+    ws.onerror = () => setStatus("socket error", false);
+  }
+
+  term.onData((data) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(encoder.encode(data)); // binary frame = raw input
+    }
+  });
+  term.onResize(({ rows, cols }) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "resize", rows, cols })); // text control
+    }
+  });
+  window.addEventListener("resize", () => { try { fit.fit(); } catch (e) {} });
+
+  $("connect").addEventListener("click", connect);
+  $("kill").addEventListener("click", async () => {
+    const baseUrl = $("baseUrl").value.replace(/\/+$/, "");
+    const sandboxId = $("sandboxId").value.trim();
+    if (!ptyId) return;
+    try {
+      await fetch(`${baseUrl}/sandboxes/${sandboxId}/pty/${ptyId}/kill`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+      });
+    } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

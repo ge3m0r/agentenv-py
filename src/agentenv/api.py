@@ -26,6 +26,18 @@ from .filesystem import (
     FilesystemService,
 )
 from .orchestrator import AgentEnvError, ConflictError, NotFoundError, Orchestrator
+from .pty import (
+    PtyConflictError,
+    PtyNotFoundError,
+    PtyServiceError,
+    PtyUnavailableError,
+)
+from .pty_ws import (
+    OPCODE_BINARY,
+    OPCODE_TEXT,
+    WebSocket,
+    websocket_handshake,
+)
 
 
 class AgentEnvApi:
@@ -260,6 +272,65 @@ class AgentEnvApi:
                 recursive=bool(body.get("recursive", False)),
             )
             return 204, {}
+        if action == "pty" and method == "POST":
+            item = self.orchestrator.pty.start(
+                sandbox_id,
+                rows=int(body.get("rows", 24)),
+                cols=int(body.get("cols", 80)),
+                command=body.get("command"),
+                cwd=body.get("cwd"),
+                envs=body.get("envs") or body.get("envVars"),
+            )
+            result = item.to_dict()
+            result["ptyID"] = item.id
+            return 201, result
+        if action == "pty" and method == "GET":
+            return 200, [
+                item.to_dict()
+                for item in self.orchestrator.pty.list(sandbox_id)
+            ]
+        pty_match = re.fullmatch(
+            r"pty/([^/]+)(?:/(input|output|resize|kill|wait))?",
+            action or "",
+        )
+        if pty_match:
+            pty_id, pty_action = pty_match.groups()
+            if pty_action is None and method == "GET":
+                return 200, self.orchestrator.pty.get(
+                    sandbox_id, pty_id
+                ).to_dict()
+            if pty_action is None and method == "DELETE":
+                self.orchestrator.pty.kill(sandbox_id, pty_id)
+                return 204, {}
+            if pty_action == "input" and method == "POST":
+                data = self._decode_pty_data(
+                    body["data"], body.get("encoding", "utf-8")
+                )
+                return 200, self.orchestrator.pty.send_input(
+                    sandbox_id, pty_id, data
+                ).to_dict()
+            if pty_action == "output" and method == "POST":
+                return 200, self.orchestrator.pty.read_output(
+                    sandbox_id,
+                    pty_id,
+                    offset=int(body.get("offset", 0)),
+                    wait_seconds=float(body.get("wait_seconds", 0)),
+                )
+            if pty_action == "resize" and method == "POST":
+                return 200, self.orchestrator.pty.resize(
+                    sandbox_id,
+                    pty_id,
+                    int(body["rows"]),
+                    int(body["cols"]),
+                ).to_dict()
+            if pty_action == "kill" and method == "POST":
+                return 200, self.orchestrator.pty.kill(
+                    sandbox_id, pty_id
+                ).to_dict()
+            if pty_action == "wait" and method == "POST":
+                return 200, self.orchestrator.pty.wait(
+                    sandbox_id, pty_id, body.get("timeout")
+                ).to_dict()
         if method == "POST" and action == "pause":
             self.orchestrator.pause(sandbox_id)
             return 204, {}
@@ -308,6 +379,113 @@ class AgentEnvApi:
         value = body.get("timeout_seconds", body.get("timeout", default))
         return None if value in (None, 0) else int(value)
 
+    @staticmethod
+    def _decode_pty_data(data: str, encoding: str) -> bytes:
+        if encoding == "utf-8":
+            return data.encode("utf-8")
+        if encoding == "base64":
+            import base64
+
+            return base64.b64decode(data)
+        if encoding == "hex":
+            return bytes.fromhex(data)
+        raise PtyServiceError("encoding must be utf-8, base64 or hex")
+
+    # -- WebSocket PTY transport ----------------------------------------
+
+    def handle_websocket(self, handler: BaseHTTPRequestHandler) -> bool:
+        """Handle a PTY WebSocket upgrade. Returns True if the request was a
+        PTY websocket route (handled here), False to fall through to the
+        normal JSON dispatch."""
+        if handler.headers.get("upgrade", "").lower() != "websocket":
+            return False
+        parsed = urlsplit(handler.path)
+        path = parsed.path.rstrip("/") or "/"
+        match = re.fullmatch(r"/sandboxes/([^/]+)/pty/([^/]+)", path)
+        if not match:
+            return False
+        sandbox_id, pty_id = match.group(1), match.group(2)
+        offset = int(parse_qs(parsed.query).get("offset", ["0"])[0])
+        try:
+            session = self.orchestrator.pty.session(sandbox_id, pty_id)
+        except (PtyNotFoundError, NotFoundError):
+            handler.send_response(HTTPStatus.NOT_FOUND)
+            handler.send_header("content-type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(b'{"error":"pty not found"}')
+            return True
+        if not websocket_handshake(handler):
+            return True
+        ws = WebSocket(handler.rfile, handler.wfile)
+        self._bridge_pty(ws, session, offset)
+        return True
+
+    def _bridge_pty(
+        self, ws: WebSocket, session: Any, offset: int
+    ) -> None:
+        stop = threading.Event()
+
+        def pump() -> None:
+            position = offset
+            while not stop.is_set() and not ws.closed:
+                data = session.read_output(position, wait_seconds=1.0)
+                if data:
+                    try:
+                        ws.send_binary(data)
+                    except OSError:
+                        break
+                    position += len(data)
+                if session.completed.is_set() and not data:
+                    try:
+                        ws.send_text(
+                            json.dumps(
+                                {
+                                    "type": "exit",
+                                    "exitCode": session.info.exit_code,
+                                }
+                            )
+                        )
+                    except OSError:
+                        pass
+                    break
+
+        threading.Thread(
+            target=pump, name=f"pty-ws-{session.info.id}", daemon=True
+        ).start()
+        try:
+            while not stop.is_set():
+                frame = ws.recv()
+                if frame is None:
+                    break
+                opcode, payload = frame
+                if opcode == OPCODE_BINARY:
+                    try:
+                        session.send_input(payload)
+                    except PtyServiceError:
+                        break
+                elif opcode == OPCODE_TEXT:
+                    try:
+                        message = json.loads(payload.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if message.get("type") == "resize":
+                        try:
+                            session.resize(
+                                int(message["rows"]), int(message["cols"])
+                            )
+                        except PtyServiceError:
+                            pass
+                    elif message.get("type") == "kill":
+                        try:
+                            session.kill()
+                        except PtyServiceError:
+                            pass
+        except OSError:
+            pass
+        finally:
+            stop.set()
+            ws.close()
+
     def _filtered_sandboxes(self, query: dict[str, list[str]]):
         sandboxes = self.orchestrator.list_sandboxes()
         states = {
@@ -345,6 +523,9 @@ class AgentEnvApi:
 def make_handler(api: AgentEnvApi) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def _handle(self) -> None:
+            if self.headers.get("upgrade", "").lower() == "websocket":
+                api.handle_websocket(self)
+                return
             try:
                 length = int(self.headers.get("content-length", "0"))
                 body = json.loads(self.rfile.read(length)) if length else {}
@@ -355,15 +536,21 @@ def make_handler(api: AgentEnvApi) -> type[BaseHTTPRequestHandler]:
                 status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
             except CommandNotFoundError as error:
                 status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
+            except PtyNotFoundError as error:
+                status, result = HTTPStatus.NOT_FOUND, {"error": str(error)}
             except ConflictError as error:
                 status, result = HTTPStatus.CONFLICT, {"error": str(error)}
             except FilesystemConflictError as error:
                 status, result = HTTPStatus.CONFLICT, {"error": str(error)}
             except CommandConflictError as error:
                 status, result = HTTPStatus.CONFLICT, {"error": str(error)}
+            except PtyConflictError as error:
+                status, result = HTTPStatus.CONFLICT, {"error": str(error)}
             except FilesystemError as error:
                 status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}
             except CommandServiceError as error:
+                status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}
+            except PtyServiceError as error:
                 status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}
             except (AgentEnvError, KeyError, ValueError) as error:
                 status, result = HTTPStatus.BAD_REQUEST, {"error": str(error)}

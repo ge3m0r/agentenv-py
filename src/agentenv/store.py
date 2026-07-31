@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -35,7 +36,19 @@ class JsonMetadataStore:
             json.dump(data, file, ensure_ascii=False, indent=2)
             file.flush()
             os.fsync(file.fileno())
-        os.replace(temporary, self.path)
+        # On Windows, os.replace can intermittently fail with PermissionError
+        # when something (AV, another handle) briefly holds the destination.
+        # Retry briefly so the atomic write is robust across platforms.
+        last_error: Exception | None = None
+        for attempt in range(5):
+            try:
+                os.replace(temporary, self.path)
+                return
+            except PermissionError as error:  # pragma: no cover - Windows only
+                last_error = error
+                time.sleep(0.01 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     def _all(self, key: str, model: type) -> list[Any]:
         with self._lock:

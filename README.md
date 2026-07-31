@@ -28,6 +28,9 @@ OCI/Template → Sandbox → Exec → Pause/Resume
 - E2B 风格的控制面字段、状态码和生命周期接口；
 - Local/Docker 统一 Filesystem 数据面，支持文本、二进制和路径隔离；
 - 可重连的后台 Commands，支持增量输出、stdin、信号和进程生命周期；
+- 可重连的交互式 PTY 数据面，支持双向 I/O、resize、kill 和重新连接；
+- 纯 stdlib 实现的 WebSocket 传输层（PTY），无运行时依赖；
+- Windows 上 `os.replace` 原子写入的重试保护；
 - Python 3.10–3.12 自动化测试。
 
 ## 本机后端快速开始
@@ -231,6 +234,53 @@ Python 客户端的完整调用示例，见
 [E2B 兼容层推进路线](docs/e2b-roadmap.md)。该文档按工作队列维护：当前
 第一项完成并通过验收后会直接删除，由下一项成为新的当前阶段。
 
+## PTY 交互式终端
+
+PTY 数据面提供可交互的伪终端，与 `commands`、`filesystem` 对等，由
+`PtyService`（可重连输出缓冲）和各后端的 PTY 原语实现。传输层是**纯标准库
+实现的 WebSocket**（RFC 6455 握手与帧编解码，无 `websockets`/`aiohttp`
+依赖），挂在现有 `ThreadingHTTPServer` 上。
+
+协议：二进制帧承载原始 PTY 输入/输出字节；文本帧承载 JSON 控制消息
+（`{"type":"resize",...}` / `{"type":"kill"}`）；客户端可带 `?offset=` 重连
+并续传缓冲输出。删除 Sandbox 会清理其 PTY 会话，不会残留进程。
+
+启动服务（E2B 后端，Windows 上开箱即用且支持 resize）：
+
+```bash
+pip install -e ".[e2b]"
+PYTHONPATH=src python3.10 -m agentenv --backend e2b \
+  --data-dir /tmp/agentenv-pty serve
+```
+
+REST 创建会话，再用浏览器客户端连接：
+
+```bash
+# 1. 创建 sandbox 后，创建 PTY 会话
+curl -X POST http://127.0.0.1:8000/sandboxes/<id>/pty \
+  -H 'content-type: application/json' -d '{"rows":24,"cols":80}'
+# -> {"ptyID":"pty_...","pid":...,"state":"running",...}
+
+# 2. 用浏览器打开 examples/pty_client.html，填入 sandbox id 即可交互
+#    （xterm.js 从 CDN 加载，原生 WebSocket 连接 ws://127.0.0.1:8000/...）
+```
+
+也可纯 REST 使用：`POST .../pty/{ptyID}/input`（发送字节）、
+`POST .../pty/{ptyID}/output`（按 offset 读取输出）、
+`POST .../pty/{ptyID}/resize`、`POST .../pty/{ptyID}/kill`。
+
+后端能力对照：
+
+| 后端 | 交互 | resize | 说明 |
+|---|---|---|---|
+| E2B | ✅ | ✅ | 服务端 PTY，Windows 可用，`Pty.create` 流式 `on_pty` |
+| Docker | ✅ | ❌ | `docker exec -it`；CLI 不支持启动后 resize |
+| Local | Unix ✅ / Windows ❌ | Unix ✅ | `pty.openpty`；Windows 需 ConPTY |
+
+真实 E2B PTY 端到端示例见
+[`examples/pty_e2b_demo.py`](examples/pty_e2b_demo.py)，
+浏览器客户端见 [`examples/pty_client.html`](examples/pty_client.html)。
+
 ## 项目结构
 
 ```text
@@ -241,6 +291,9 @@ src/agentenv/
 ├── e2b_backend.py   # E2BSandboxBackend（可选依赖 e2b）
 ├── orchestrator.py  # 状态机、回滚、恢复、TTL 和策略更新
 ├── e2b.py           # E2B 请求/响应适配
+├── commands.py      # 可重连的后台命令数据面
+├── pty.py           # 可重连的交互式 PTY 数据面（PtyService）
+├── pty_ws.py        # 纯 stdlib WebSocket 服务端（PTY 传输层）
 ├── filesystem.py    # Local/Docker 统一文件数据面与路径隔离
 ├── commands.py      # 后台命令、增量输出、stdin、信号和重连
 ├── store.py         # JSON 元数据原子持久化

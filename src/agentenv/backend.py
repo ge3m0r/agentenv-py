@@ -4,11 +4,14 @@ import os
 import signal
 import shutil
 import subprocess
+import sys
+import threading
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Callable
+from typing import Any, Callable
 
 from .models import (
     CommandResult,
@@ -20,6 +23,14 @@ from .models import (
 )
 from .oci import DockerImageResolver
 from .filesystem import FilesystemUnavailableError, WorkspaceFilesystem
+
+
+@dataclass
+class LocalPtyHandle:
+    """Opaque handle for a local PTY: master fd for I/O + child pid for kill."""
+
+    master_fd: int
+    pid: int
 
 
 class SandboxBackend(ABC):
@@ -62,6 +73,37 @@ class SandboxBackend(ABC):
     def cleanup_managed_command(
         self, sandbox: Sandbox, command_id: str
     ) -> None:
+        return None
+
+    def start_pty(
+        self,
+        sandbox: Sandbox,
+        pty_id: str,
+        *,
+        rows: int,
+        cols: int,
+        command: str | None,
+        cwd: str | None,
+        envs: dict[str, str] | None,
+        on_output: "Callable[[bytes], None]",
+        on_exit: "Callable[[int], None]",
+    ) -> tuple[Any, int]:
+        raise NotImplementedError
+
+    def send_pty_input(
+        self, sandbox: Sandbox, handle: Any, data: bytes
+    ) -> None:
+        raise NotImplementedError
+
+    def resize_pty(
+        self, sandbox: Sandbox, handle: Any, rows: int, cols: int
+    ) -> None:
+        raise NotImplementedError
+
+    def kill_pty(self, sandbox: Sandbox, handle: Any) -> None:
+        raise NotImplementedError
+
+    def cleanup_pty(self, sandbox: Sandbox, pty_id: str) -> None:
         return None
 
     @abstractmethod
@@ -173,6 +215,120 @@ class LocalProcessBackend(SandboxBackend):
                 os.killpg(process.pid, signal.SIGCONT)
             except ProcessLookupError:
                 pass
+
+    def start_pty(
+        self,
+        sandbox: Sandbox,
+        pty_id: str,
+        *,
+        rows: int,
+        cols: int,
+        command: str | None,
+        cwd: str | None,
+        envs: dict[str, str] | None,
+        on_output: Callable[[bytes], None],
+        on_exit: Callable[[int], None],
+    ) -> tuple["LocalPtyHandle", int]:
+        if sys.platform == "win32":
+            raise NotImplementedError(
+                "local PTY requires a Unix-like system; use the docker or e2b backend"
+            )
+        import fcntl
+        import pty as _pty
+        import struct
+        import termios
+
+        root = Path(sandbox.workspace_path).resolve()
+        working_directory = (root / (cwd or sandbox.workdir)).resolve()
+        if root != working_directory and root not in working_directory.parents:
+            raise ValueError("workdir must stay inside the sandbox workspace")
+        working_directory.mkdir(parents=True, exist_ok=True)
+
+        master_fd, slave_fd = _pty.openpty()
+        self._set_pty_size(master_fd, rows, cols, fcntl, termios, struct)
+        pid = os.fork()
+        if pid == 0:  # child
+            try:
+                os.setsid()
+                fcntl.ioctl(slave_fd, termios.TIOCSCTTY, 0)
+                os.dup2(slave_fd, 0)
+                os.dup2(slave_fd, 1)
+                os.dup2(slave_fd, 2)
+                os.close(master_fd)
+                environment = os.environ.copy()
+                environment.update(envs or {})
+                environment.update(sandbox.env)
+                os.chdir(working_directory)
+                shell = environment.get("SHELL", "/bin/sh")
+                argv = (
+                    [shell, "-l", "-c", command] if command else [shell, "-l"]
+                )
+                os.execvpe(shell, argv, environment)
+            except Exception:
+                os._exit(127)
+        os.close(slave_fd)
+
+        def reader() -> None:
+            try:
+                while True:
+                    try:
+                        data = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not data:
+                        break
+                    on_output(data)
+            finally:
+                try:
+                    _, status = os.waitpid(pid, 0)
+                    if os.WIFEXITED(status):
+                        code = os.WEXITSTATUS(status)
+                    elif os.WIFSIGNALED(status):
+                        code = 128 + os.WTERMSIG(status)
+                    else:
+                        code = -1
+                except OSError:
+                    code = -1
+                on_exit(code)
+
+        threading.Thread(
+            target=reader, name=f"{pty_id}-reader", daemon=True
+        ).start()
+        return LocalPtyHandle(master_fd=master_fd, pid=pid), pid
+
+    def send_pty_input(
+        self, sandbox: Sandbox, handle: "LocalPtyHandle", data: bytes
+    ) -> None:
+        os.write(handle.master_fd, data)
+
+    def resize_pty(
+        self, sandbox: Sandbox, handle: "LocalPtyHandle", rows: int, cols: int
+    ) -> None:
+        import fcntl
+        import struct
+        import termios
+
+        self._set_pty_size(handle.master_fd, rows, cols, fcntl, termios, struct)
+
+    def kill_pty(self, sandbox: Sandbox, handle: "LocalPtyHandle") -> None:
+        try:
+            os.killpg(os.getpgid(handle.pid), signal.SIGKILL)
+        except (ProcessLookupError, OSError):
+            pass
+
+    def cleanup_pty(self, sandbox: Sandbox, pty_id: str) -> None:
+        return None
+
+    @staticmethod
+    def _set_pty_size(fd: int, rows: int, cols: int, fcntl, termios, struct) -> None:
+        try:
+            fcntl.ioctl(
+                fd,
+                termios.TIOCSWINSZ,
+                struct.pack("HHHH", rows, cols, 0, 0),
+            )
+        except OSError:
+            pass
 
     def create(self, template: Template, sandbox: Sandbox) -> None:
         source = Path(template.rootfs_path)
@@ -377,6 +533,88 @@ class DockerSandboxBackend(SandboxBackend):
             pid_file.unlink()
         except FileNotFoundError:
             pass
+
+    def start_pty(
+        self,
+        sandbox: Sandbox,
+        pty_id: str,
+        *,
+        rows: int,
+        cols: int,
+        command: str | None,
+        cwd: str | None,
+        envs: dict[str, str] | None,
+        on_output: Callable[[bytes], None],
+        on_exit: Callable[[int], None],
+    ) -> tuple[subprocess.Popen[bytes], int]:
+        arguments = [
+            self.docker_binary,
+            "exec",
+            "-i",
+            "-t",
+            "-w",
+            self._container_workdir(sandbox),
+        ]
+        for key, value in sandbox.env.items():
+            arguments.extend(["-e", f"{key}={value}"])
+        if envs:
+            for key, value in envs.items():
+                arguments.extend(["-e", f"{key}={value}"])
+        arguments.append(self._runtime_id(sandbox))
+        if command:
+            arguments.extend(["/bin/sh", "-lc", command])
+        else:
+            arguments.extend(["/bin/sh", "-l"])
+        process = self.popen_factory(
+            arguments,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+        def reader() -> None:
+            try:
+                stream = process.stdout
+                while True:
+                    data = stream.read1(4096) if hasattr(stream, "read1") else stream.read(4096)
+                    if not data:
+                        break
+                    on_output(data)
+            finally:
+                on_exit(process.wait())
+
+        threading.Thread(
+            target=reader, name=f"{pty_id}-reader", daemon=True
+        ).start()
+        return process, process.pid
+
+    def send_pty_input(
+        self, sandbox: Sandbox, handle: subprocess.Popen[bytes], data: bytes
+    ) -> None:
+        if handle.stdin is None:
+            raise DockerBackendError("PTY stdin is not available")
+        try:
+            handle.stdin.write(data)
+            handle.stdin.flush()
+        except (BrokenPipeError, OSError) as error:
+            raise DockerBackendError("PTY stdin is closed") from error
+
+    def resize_pty(
+        self, sandbox: Sandbox, handle: subprocess.Popen[bytes], rows: int, cols: int
+    ) -> None:
+        # The Docker CLI does not expose resizing a `docker exec` PTY after it
+        # has started; the container API endpoint is not reachable via CLI.
+        raise NotImplementedError(
+            "docker PTY cannot be resized after start via the Docker CLI"
+        )
+
+    def kill_pty(self, sandbox: Sandbox, handle: subprocess.Popen[bytes]) -> None:
+        if handle.poll() is None:
+            handle.kill()
+
+    def cleanup_pty(self, sandbox: Sandbox, pty_id: str) -> None:
+        return None
 
     def __init__(
         self,

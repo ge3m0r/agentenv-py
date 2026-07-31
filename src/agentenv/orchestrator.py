@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .backend import LocalProcessBackend, SandboxBackend
 from .commands import CommandService
+from .pty import PtyService
 from .models import (
     CommandResult,
     LifecycleEvent,
@@ -64,6 +65,7 @@ class Orchestrator:
         self.store = JsonMetadataStore(self.data_dir)
         self.backend = backend or LocalProcessBackend()
         self.commands = CommandService(self)
+        self.pty = PtyService(self)
         self._lock = RLock()
         self.recover_interrupted_operations()
 
@@ -376,6 +378,7 @@ class Orchestrator:
             ):
                 self.backend.pause(sandbox)
                 self.commands.pause_sandbox(sandbox)
+                self.pty.pause_sandbox(sandbox)
             self._event("sandbox_paused", "sandbox", sandbox.id)
             return sandbox
 
@@ -392,6 +395,7 @@ class Orchestrator:
             ):
                 self.backend.resume(sandbox)
                 self.commands.resume_sandbox(sandbox)
+                self.pty.resume_sandbox(sandbox)
             self._event("sandbox_resumed", "sandbox", sandbox.id)
             return sandbox
 
@@ -523,6 +527,7 @@ class Orchestrator:
             self.store.put_sandbox(sandbox)
             try:
                 self.commands.terminate_sandbox(sandbox)
+                self.pty.terminate_sandbox(sandbox)
                 self.backend.destroy(sandbox)
             except Exception:
                 sandbox.state = previous
